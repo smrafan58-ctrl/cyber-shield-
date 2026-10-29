@@ -7,5 +7,5 @@ if ! command -v javac >/dev/null 2>&1; then
 fi
 
 npx vite build
-javac backend/CyberShieldServer.java
+javac backend/ScanHistoryJavaStore.java backend/GeminiJavaService.java backend/CyberShieldServer.java
 exec java -cp backend CyberShieldServer

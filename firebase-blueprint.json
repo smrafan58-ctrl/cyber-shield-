@@ -1,0 +1,204 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Authenticated user profile metadata for CyberShield AI.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Firebase Auth UID matching the document ID.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "displayName": {
+          "type": "string",
+          "description": "Public display name from Google Sign-In.",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "photoURL": {
+          "type": "string",
+          "description": "Optional avatar URL from Google Sign-In.",
+          "minLength": 0,
+          "maxLength": 1024
+        },
+        "scanCount": {
+          "type": "integer",
+          "description": "Total number of URL scans saved by this user."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the profile was first created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the profile was last updated."
+        }
+      },
+      "required": [
+        "uid",
+        "displayName",
+        "photoURL",
+        "scanCount",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "ScanRecord": {
+      "title": "ScanRecord",
+      "description": "Persisted deterministic URL threat analysis record belonging to an authenticated user.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Deterministic or unique scan record identifier matching the document ID.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "userId": {
+          "type": "string",
+          "description": "Owner Firebase Auth UID.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "normalizedUrl": {
+          "type": "string",
+          "description": "Normalized URL string.",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "redactedUrl": {
+          "type": "string",
+          "description": "Sanitized URL with query parameter values redacted.",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "hostname": {
+          "type": "string",
+          "description": "Extracted hostname.",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "registrableDomain": {
+          "type": "string",
+          "description": "Extracted registrable domain.",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "subdomain": {
+          "type": "string",
+          "description": "Extracted subdomain or None.",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "tld": {
+          "type": "string",
+          "description": "Extracted top-level domain or IP Literal.",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "protocol": {
+          "type": "string",
+          "description": "URL scheme protocol.",
+          "enum": ["HTTP", "HTTPS"]
+        },
+        "port": {
+          "type": "string",
+          "description": "Extracted port or Default.",
+          "minLength": 1,
+          "maxLength": 32
+        },
+        "path": {
+          "type": "string",
+          "description": "Extracted URL path.",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "urlLength": {
+          "type": "integer",
+          "description": "Character length of the normalized URL."
+        },
+        "queryParamCount": {
+          "type": "integer",
+          "description": "Number of query parameters detected."
+        },
+        "riskScore": {
+          "type": "integer",
+          "description": "Calculated risk score from 0 to 100."
+        },
+        "classification": {
+          "type": "string",
+          "description": "Risk classification label.",
+          "enum": [
+            "LOW RISK INDICATORS",
+            "MILD SUSPICION",
+            "MODERATE RISK",
+            "HIGH RISK",
+            "VERY HIGH RISK"
+          ]
+        },
+        "summaryExplanation": {
+          "type": "string",
+          "description": "Concise human-readable explanation of the risk score.",
+          "minLength": 1,
+          "maxLength": 1000
+        },
+        "indicatorNames": {
+          "type": "array",
+          "description": "Bounded list of triggered heuristic indicator names (max 20)."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the scan record was created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the scan record was last updated."
+        }
+      },
+      "required": [
+        "id",
+        "userId",
+        "normalizedUrl",
+        "redactedUrl",
+        "hostname",
+        "registrableDomain",
+        "subdomain",
+        "tld",
+        "protocol",
+        "port",
+        "path",
+        "urlLength",
+        "queryParamCount",
+        "riskScore",
+        "classification",
+        "summaryExplanation",
+        "indicatorNames",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": {
+        "$ref": "#/entities/UserProfile"
+      },
+      "description": "Stores private per-user profile metadata isolated to the authenticated owner."
+    },
+    "/scans/{scanId}": {
+      "schema": {
+        "$ref": "#/entities/ScanRecord"
+      },
+      "description": "Stores persisted URL threat analysis records owned by authenticated users."
+    }
+  }
+}

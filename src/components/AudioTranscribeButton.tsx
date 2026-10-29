@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Mic, Square, Loader2 } from 'lucide-react';
+import { transcribeAudioViaJavaBackend } from '../api/javaBackendClient';
 
 interface AudioTranscribeButtonProps {
   mode: 'url' | 'chat';
@@ -54,23 +55,13 @@ export const AudioTranscribeButton: React.FC<AudioTranscribeButtonProps> = ({
     onStatusMessage?.('Transcribing audio with gemini-3.5-transcribe...');
 
     try {
-      const res = await fetch('/api/transcribe', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          audioData: base64Audio,
-          mimeType,
-          mode,
-        }),
+      const { ok, data } = await transcribeAudioViaJavaBackend({
+        audioData: base64Audio,
+        mimeType,
+        mode,
       });
 
-      const data = (await res.json()) as {
-        transcript?: string;
-        model?: string;
-        error?: string;
-      };
-
-      if (!res.ok || !data.transcript) {
+      if (!ok || !data.transcript) {
         onStatusMessage?.(
           data.error || 'Could not transcribe audio. Please try speaking again.'
         );
@@ -177,6 +168,7 @@ export const AudioTranscribeButton: React.FC<AudioTranscribeButtonProps> = ({
     return (
       <button
         type="button"
+        data-testid={`audio-transcribe-btn-${mode}`}
         onClick={handleToggleRecording}
         disabled={disabled || isTranscribing}
         aria-label={
@@ -189,18 +181,18 @@ export const AudioTranscribeButton: React.FC<AudioTranscribeButtonProps> = ({
             ? 'Stop recording & transcribe audio (gemini-3.5-transcribe)'
             : 'Transcribe voice with microphone (gemini-3.5-transcribe)'
         }
-        className={`inline-flex items-center justify-center gap-1 rounded-lg border px-2.5 py-2 text-xs font-medium transition-colors shrink-0 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed ${
+        className={`inline-flex items-center justify-center gap-1.5 rounded-lg border px-3 py-2 text-xs font-medium transition-colors shrink-0 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed ${
           isRecording
-            ? 'border-rose-500/70 bg-rose-500/20 text-rose-200 hover:bg-rose-500/30'
-            : 'border-slate-700 bg-slate-800/80 text-slate-200 hover:border-sky-400/50 hover:text-sky-300'
+            ? 'border-rose-400 bg-rose-50 text-rose-700 hover:bg-rose-100'
+            : 'border-[#EEDBC8] bg-[#FDF5EB] text-[#231710] hover:border-[#C85A32] hover:bg-[#FDECD8]'
         }`}
       >
         {isTranscribing ? (
-          <Loader2 className="h-3.5 w-3.5 animate-spin text-sky-400" aria-hidden="true" />
+          <Loader2 className="h-3.5 w-3.5 animate-spin text-[#C85A32]" aria-hidden="true" />
         ) : isRecording ? (
-          <Square className="h-3.5 w-3.5 text-rose-400 fill-rose-400" aria-hidden="true" />
+          <Square className="h-3.5 w-3.5 text-rose-600 fill-rose-600" aria-hidden="true" />
         ) : (
-          <Mic className="h-3.5 w-3.5 text-sky-400" aria-hidden="true" />
+          <Mic className="h-3.5 w-3.5 text-[#C85A32]" aria-hidden="true" />
         )}
         <span className="sr-only sm:not-sr-only">
           {isTranscribing ? 'Transcribing' : isRecording ? 'Stop' : 'Voice'}
@@ -212,6 +204,7 @@ export const AudioTranscribeButton: React.FC<AudioTranscribeButtonProps> = ({
   return (
     <button
       type="button"
+      data-testid={`audio-transcribe-btn-${mode}`}
       onClick={handleToggleRecording}
       disabled={disabled || isTranscribing}
       aria-label={
@@ -224,18 +217,18 @@ export const AudioTranscribeButton: React.FC<AudioTranscribeButtonProps> = ({
           ? 'Stop recording & transcribe audio (gemini-3.5-transcribe)'
           : 'Voice URL dictation powered by gemini-3.5-transcribe'
       }
-      className={`inline-flex items-center justify-center gap-1.5 rounded-lg border px-3.5 py-3 text-sm font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed ${
+      className={`inline-flex items-center justify-center gap-1.5 rounded-lg border px-3.5 py-3.5 text-xs sm:text-sm font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed ${
         isRecording
-          ? 'border-rose-500/70 bg-rose-500/20 text-rose-200 hover:bg-rose-500/30'
-          : 'border-slate-700 bg-slate-800/80 text-slate-200 hover:bg-slate-700 hover:text-white'
+          ? 'border-rose-400 bg-rose-50 text-rose-700 hover:bg-rose-100'
+          : 'border-[#EEDBC8] bg-[#FDF5EB] text-[#231710] hover:border-[#C85A32] hover:bg-[#FDECD8]'
       }`}
     >
       {isTranscribing ? (
-        <Loader2 className="h-4 w-4 shrink-0 animate-spin text-sky-400" aria-hidden="true" />
+        <Loader2 className="h-4 w-4 shrink-0 animate-spin text-[#C85A32]" aria-hidden="true" />
       ) : isRecording ? (
-        <Square className="h-4 w-4 shrink-0 text-rose-400 fill-rose-400" aria-hidden="true" />
+        <Square className="h-4 w-4 shrink-0 text-rose-600 fill-rose-600" aria-hidden="true" />
       ) : (
-        <Mic className="h-4 w-4 shrink-0 text-sky-400" aria-hidden="true" />
+        <Mic className="h-4 w-4 shrink-0 text-[#C85A32]" aria-hidden="true" />
       )}
       <span>
         {isTranscribing
@@ -247,3 +240,5 @@ export const AudioTranscribeButton: React.FC<AudioTranscribeButtonProps> = ({
     </button>
   );
 };
+
+

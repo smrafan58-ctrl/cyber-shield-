@@ -5,7 +5,6 @@ import {
   X,
   RotateCcw,
   Shield,
-  Sparkles,
   Bot,
   User,
   Zap,
@@ -13,7 +12,9 @@ import {
   AlertCircle,
 } from 'lucide-react';
 import { URLAnalysisResult } from '../types/scanner';
+
 import { AudioTranscribeButton } from './AudioTranscribeButton';
+import { sendChatToJavaBackend } from '../api/javaBackendClient';
 
 export type GeminiModelOption =
   | 'gemini-3.8-flash'
@@ -210,24 +211,14 @@ export const CyberShieldChatbot: React.FC<CyberShieldChatbotProps> = ({
         text: m.text,
       }));
 
-      const res = await fetch('/api/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model: selectedModel,
-          rolePreset,
-          scanContext: formatActiveScanContext(activeScanResult),
-          messages: apiMessages,
-        }),
+      const { ok, data } = await sendChatToJavaBackend({
+        model: selectedModel,
+        rolePreset,
+        scanContext: formatActiveScanContext(activeScanResult),
+        messages: apiMessages,
       });
 
-      const data = (await res.json()) as {
-        reply?: string;
-        model?: string;
-        error?: string;
-      };
-
-      if (!res.ok || !data.reply) {
+      if (!ok || !data.reply) {
         setErrorMessage(
           data.error ||
             'Unable to reach the Gemini cybersecurity assistant right now. Please try again.'
@@ -276,19 +267,19 @@ export const CyberShieldChatbot: React.FC<CyberShieldChatbotProps> = ({
         <div className="fixed bottom-5 right-5 z-50">
           <button
             type="button"
+            data-testid="chatbot-toggle-button"
             onClick={onToggleOpen}
             aria-label="Open CyberShield Gemini Security Chatbot"
-            className="inline-flex items-center gap-2.5 rounded-xl border border-sky-400/50 bg-[#111827] px-4 py-3 text-xs sm:text-sm font-semibold text-slate-100 shadow-2xl hover:border-sky-400 hover:bg-slate-900 transition-colors cursor-pointer"
+            className="inline-flex items-center gap-3 rounded-xl border border-[#E6C9AE] bg-[#FFFDF9] px-4 py-3 text-xs sm:text-sm font-semibold text-[#231710] shadow-editorial-lg hover:border-[#C85A32] hover:bg-[#FDF5EB] transition-all cursor-pointer"
           >
-            <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-sky-400 text-slate-950">
+            <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-warm-cta text-white">
               <MessageSquare className="h-4 w-4" aria-hidden="true" />
             </span>
             <div className="text-left">
-              <div className="flex items-center gap-1.5">
-                <span>AI Security Analyst</span>
-                <Sparkles className="h-3.5 w-3.5 text-sky-400" aria-hidden="true" />
+              <div className="font-display font-bold text-sm text-[#231710]">
+                AI Security Advisor
               </div>
-              <div className="text-[11px] font-normal text-slate-400">
+              <div className="text-[11px] font-normal text-[#7A5C49]">
                 Multi-turn Gemini Assistant
               </div>
             </div>
@@ -299,20 +290,21 @@ export const CyberShieldChatbot: React.FC<CyberShieldChatbotProps> = ({
       {/* Slide-Up / Docked Multi-Turn Chat Window */}
       {isOpen && (
         <aside
+          data-testid="chatbot-drawer"
           aria-label="CyberShield AI Multi-Turn Gemini Chatbot"
-          className="fixed bottom-4 right-4 z-50 w-[calc(100vw-2rem)] sm:w-[430px] max-h-[calc(100vh-5rem)] flex flex-col rounded-xl border border-slate-700/90 bg-[#0F172A] shadow-2xl overflow-hidden"
+          className="fixed bottom-4 right-4 z-50 w-[calc(100vw-2rem)] sm:w-[440px] max-h-[calc(100vh-5rem)] flex flex-col rounded-2xl border border-[#E6C9AE] bg-[#FFFDF9] shadow-editorial-lg overflow-hidden"
         >
           {/* Chat Header */}
-          <div className="flex items-center justify-between gap-3 border-b border-slate-800 bg-[#111827] px-4 py-3">
+          <div className="flex items-center justify-between gap-3 border-b border-[#E6C9AE] bg-[#FDECD8] px-4 py-3.5">
             <div className="flex items-center gap-2.5 min-w-0">
-              <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-sky-400/15 border border-sky-400/40 text-sky-400">
+              <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-[#FFFDF9] border border-[#E6C9AE] text-[#C85A32]">
                 <Shield className="h-4 w-4" aria-hidden="true" />
               </div>
               <div className="min-w-0">
-                <h2 className="text-sm font-semibold text-slate-100 truncate">
-                  CyberShield Gemini Chat
+                <h2 className="font-display text-sm font-bold text-[#231710] truncate">
+                  CyberShield Security Advisor
                 </h2>
-                <p className="text-[11px] text-slate-400 truncate">
+                <p className="text-[11px] text-[#7A5C49] truncate">
                   {currentRoleObj.label}
                 </p>
               </div>
@@ -323,7 +315,7 @@ export const CyberShieldChatbot: React.FC<CyberShieldChatbotProps> = ({
                 type="button"
                 onClick={handleResetChat}
                 title="Reset conversation thread"
-                className="inline-flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-800/70 px-2.5 py-1.5 text-xs font-medium text-slate-300 hover:bg-slate-800 hover:text-white transition-colors cursor-pointer"
+                className="inline-flex items-center gap-1 rounded-lg border border-[#E6C9AE] bg-[#FFFDF9] px-2.5 py-1.5 text-xs font-medium text-[#4A3528] hover:bg-[#FDF5EB] hover:text-[#231710] transition-colors cursor-pointer"
               >
                 <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
                 <span>Reset</span>
@@ -332,7 +324,7 @@ export const CyberShieldChatbot: React.FC<CyberShieldChatbotProps> = ({
                 type="button"
                 onClick={onToggleOpen}
                 aria-label="Close Gemini Chatbot"
-                className="inline-flex items-center justify-center rounded-lg border border-slate-700 bg-slate-800/70 p-1.5 text-slate-300 hover:bg-slate-800 hover:text-white transition-colors cursor-pointer"
+                className="inline-flex items-center justify-center rounded-lg border border-[#E6C9AE] bg-[#FFFDF9] p-1.5 text-[#4A3528] hover:bg-[#FDF5EB] hover:text-[#231710] transition-colors cursor-pointer"
               >
                 <X className="h-4 w-4" aria-hidden="true" />
               </button>
@@ -340,22 +332,23 @@ export const CyberShieldChatbot: React.FC<CyberShieldChatbotProps> = ({
           </div>
 
           {/* Role (System Instruction) & Model Controls */}
-          <div className="border-b border-slate-800/90 bg-[#111827]/70 px-4 py-2.5 space-y-2">
+          <div className="border-b border-[#EEDBC8] bg-[#FDF5EB] px-4 py-2.5 space-y-2">
             {/* System Role Selector */}
             <div className="flex items-center justify-between gap-2">
               <label
                 htmlFor="chatbot-role-select"
-                className="text-[11px] font-medium text-slate-400 shrink-0"
+                className="text-[11px] font-medium text-[#7A5C49] shrink-0"
               >
                 Analyst Role:
               </label>
               <select
                 id="chatbot-role-select"
+                data-testid="chatbot-role-select"
                 value={rolePreset}
                 onChange={(e) =>
                   handleRoleChange(e.target.value as ChatbotRolePreset)
                 }
-                className="min-w-0 flex-1 rounded-md border border-slate-700 bg-[#0B1120] px-2.5 py-1 text-xs text-slate-200 focus:border-sky-400 focus:outline-none truncate"
+                className="min-w-0 flex-1 rounded-md border border-[#E6C9AE] bg-[#FFFDF9] px-2.5 py-1 text-xs text-[#231710] focus:border-[#C85A32] focus:outline-none truncate"
               >
                 {ROLE_PRESETS.map((preset) => (
                   <option key={preset.id} value={preset.id}>
@@ -369,18 +362,19 @@ export const CyberShieldChatbot: React.FC<CyberShieldChatbotProps> = ({
             <div className="flex items-center justify-between gap-2">
               <label
                 htmlFor="chatbot-model-select"
-                className="text-[11px] font-medium text-slate-400 shrink-0 flex items-center gap-1"
+                className="text-[11px] font-medium text-[#7A5C49] shrink-0 flex items-center gap-1"
               >
-                <Cpu className="h-3 w-3 text-sky-400" aria-hidden="true" />
+                <Cpu className="h-3 w-3 text-[#C85A32]" aria-hidden="true" />
                 <span>Gemini Model:</span>
               </label>
               <select
                 id="chatbot-model-select"
+                data-testid="chatbot-model-select"
                 value={selectedModel}
                 onChange={(e) =>
                   setSelectedModel(e.target.value as GeminiModelOption)
                 }
-                className="min-w-0 flex-1 rounded-md border border-slate-700 bg-[#0B1120] px-2.5 py-1 text-xs font-mono text-slate-200 focus:border-sky-400 focus:outline-none truncate"
+                className="min-w-0 flex-1 rounded-md border border-[#E6C9AE] bg-[#FFFDF9] px-2.5 py-1 text-xs font-mono text-[#231710] focus:border-[#C85A32] focus:outline-none truncate"
               >
                 {MODEL_OPTIONS.map((m) => (
                   <option key={m.id} value={m.id}>
@@ -392,12 +386,12 @@ export const CyberShieldChatbot: React.FC<CyberShieldChatbotProps> = ({
 
             {/* Active Scan Context Indicator */}
             {activeScanResult && (
-              <div className="flex items-center justify-between gap-2 pt-1 border-t border-slate-800/80 text-[11px] text-sky-300 font-mono truncate">
+              <div className="flex items-center justify-between gap-2 pt-1 border-t border-[#EEDBC8] text-[11px] text-[#A94622] font-mono truncate">
                 <span className="truncate">
                   Context: {activeScanResult.domain.hostname} (
                   {activeScanResult.riskScore}/100)
                 </span>
-                <Zap className="h-3 w-3 shrink-0 text-sky-400" aria-hidden="true" />
+                <Zap className="h-3 w-3 shrink-0 text-[#C85A32]" aria-hidden="true" />
               </div>
             )}
           </div>
@@ -405,7 +399,7 @@ export const CyberShieldChatbot: React.FC<CyberShieldChatbotProps> = ({
           {/* Scrollable Conversation Thread */}
           <div
             data-testid="gemini-chat-thread"
-            className="flex-1 overflow-y-auto px-4 py-3 space-y-3 min-h-[260px] max-h-[340px]"
+            className="flex-1 overflow-y-auto px-4 py-3 space-y-3 min-h-[260px] max-h-[340px] bg-[#FFFDF9]"
           >
             {messages.map((msg) => (
               <div
@@ -417,22 +411,22 @@ export const CyberShieldChatbot: React.FC<CyberShieldChatbotProps> = ({
                 <div
                   className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-md border text-xs ${
                     msg.role === 'user'
-                      ? 'border-sky-400/40 bg-sky-400/15 text-sky-300'
-                      : 'border-slate-700 bg-slate-800 text-slate-200'
+                      ? 'border-[#C85A32]/40 bg-[#FDECD8] text-[#C85A32]'
+                      : 'border-[#EEDBC8] bg-[#FDF5EB] text-[#231710]'
                   }`}
                 >
                   {msg.role === 'user' ? (
                     <User className="h-3.5 w-3.5" aria-hidden="true" />
                   ) : (
-                    <Bot className="h-3.5 w-3.5 text-sky-400" aria-hidden="true" />
+                    <Bot className="h-3.5 w-3.5 text-[#C85A32]" aria-hidden="true" />
                   )}
                 </div>
 
                 <div
-                  className={`max-w-[82%] rounded-lg px-3 py-2 text-xs leading-relaxed ${
+                  className={`max-w-[82%] rounded-xl px-3.5 py-2.5 text-xs leading-relaxed ${
                     msg.role === 'user'
-                      ? 'bg-sky-400 text-slate-950 font-medium'
-                      : 'border border-slate-800 bg-[#111827] text-slate-200'
+                      ? 'bg-warm-cta text-white font-medium'
+                      : 'border border-[#EEDBC8] bg-[#FDF5EB] text-[#231710]'
                   }`}
                 >
                   <div className="whitespace-pre-wrap break-words">
@@ -441,8 +435,8 @@ export const CyberShieldChatbot: React.FC<CyberShieldChatbotProps> = ({
                   <div
                     className={`mt-1 flex items-center gap-1.5 text-[10px] ${
                       msg.role === 'user'
-                        ? 'text-slate-800 justify-end'
-                        : 'text-slate-400'
+                        ? 'text-white/85 justify-end'
+                        : 'text-[#7A5C49]'
                     }`}
                   >
                     <span>{msg.timestamp}</span>
@@ -459,10 +453,10 @@ export const CyberShieldChatbot: React.FC<CyberShieldChatbotProps> = ({
 
             {isLoading && (
               <div className="flex items-start gap-2.5">
-                <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md border border-slate-700 bg-slate-800 text-sky-400">
-                  <Bot className="h-3.5 w-3.5 animate-pulse" aria-hidden="true" />
+                <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md border border-[#EEDBC8] bg-[#FDF5EB] text-[#C85A32]">
+                  <Bot className="h-3.5 w-3.5" aria-hidden="true" />
                 </div>
-                <div className="rounded-lg border border-slate-800 bg-[#111827] px-3 py-2 text-xs text-slate-400">
+                <div className="rounded-xl border border-[#EEDBC8] bg-[#FDF5EB] px-3.5 py-2 text-xs text-[#7A5C49]">
                   Analyzing with {selectedModel}...
                 </div>
               </div>
@@ -471,9 +465,9 @@ export const CyberShieldChatbot: React.FC<CyberShieldChatbotProps> = ({
             {errorMessage && (
               <div
                 role="alert"
-                className="flex items-start gap-2 rounded-lg border border-rose-500/40 bg-rose-950/30 p-2.5 text-xs text-rose-200"
+                className="flex items-start gap-2 rounded-lg border border-amber-300 bg-amber-50 p-2.5 text-xs text-amber-900"
               >
-                <AlertCircle className="h-4 w-4 text-rose-400 shrink-0 mt-0.5" />
+                <AlertCircle className="h-4 w-4 text-amber-700 shrink-0 mt-0.5" />
                 <span>{errorMessage}</span>
               </div>
             )}
@@ -482,7 +476,7 @@ export const CyberShieldChatbot: React.FC<CyberShieldChatbotProps> = ({
           </div>
 
           {/* Starter Prompts */}
-          <div className="border-t border-slate-800/80 bg-[#0B1120]/90 px-3 py-2">
+          <div className="border-t border-[#EEDBC8] bg-[#FDF5EB] px-3 py-2">
             <div className="flex items-center gap-1.5 overflow-x-auto pb-1">
               {quickPrompts.map((prompt) => (
                 <button
@@ -490,7 +484,7 @@ export const CyberShieldChatbot: React.FC<CyberShieldChatbotProps> = ({
                   type="button"
                   disabled={isLoading}
                   onClick={() => sendMessage(prompt)}
-                  className="shrink-0 rounded-md border border-slate-800 bg-slate-900/90 px-2.5 py-1 text-[11px] text-slate-300 hover:border-sky-500/40 hover:text-sky-300 transition-colors cursor-pointer disabled:opacity-50"
+                  className="shrink-0 rounded-md border border-[#EEDBC8] bg-[#FFFDF9] px-2.5 py-1 text-[11px] text-[#4A3528] hover:border-[#C85A32] hover:bg-[#FDECD8] hover:text-[#231710] transition-colors cursor-pointer disabled:opacity-50"
                 >
                   {prompt}
                 </button>
@@ -504,16 +498,17 @@ export const CyberShieldChatbot: React.FC<CyberShieldChatbotProps> = ({
               e.preventDefault();
               sendMessage();
             }}
-            className="border-t border-slate-800 bg-[#111827] p-3 flex items-center gap-2"
+            className="border-t border-[#EEDBC8] bg-[#FFFDF9] p-3 flex items-center gap-2"
           >
             <input
               ref={inputFieldRef}
+              data-testid="chatbot-input"
               type="text"
               value={inputValue}
               onChange={(e) => setInputValue(e.target.value)}
               placeholder="Ask or use Voice (gemini-3.5-transcribe)..."
               aria-label="Chat message input"
-              className="min-w-0 flex-1 rounded-lg border border-slate-700 bg-[#0B1120] px-3 py-2 text-xs text-slate-100 placeholder:text-slate-500 focus:border-sky-400 focus:outline-none"
+              className="min-w-0 flex-1 rounded-lg border border-[#E6C9AE] bg-[#FDF5EB] px-3 py-2 text-xs text-[#231710] placeholder:text-[#9C7D68] focus:border-[#C85A32] focus:bg-[#FFFDF9] focus:outline-none"
             />
             <AudioTranscribeButton
               mode="chat"
@@ -530,9 +525,10 @@ export const CyberShieldChatbot: React.FC<CyberShieldChatbotProps> = ({
             />
             <button
               type="submit"
+              data-testid="chatbot-send-button"
               disabled={isLoading || !inputValue.trim()}
               aria-label="Send chat message"
-              className="inline-flex items-center justify-center gap-1.5 rounded-lg bg-sky-400 px-3 py-2 text-xs font-semibold text-slate-950 hover:bg-sky-300 disabled:opacity-40 disabled:cursor-not-allowed transition-colors cursor-pointer shrink-0"
+              className="inline-flex items-center justify-center gap-1.5 rounded-lg bg-warm-cta px-3.5 py-2 text-xs font-semibold text-white disabled:opacity-40 disabled:cursor-not-allowed transition-all cursor-pointer shrink-0"
             >
               <Send className="h-3.5 w-3.5" aria-hidden="true" />
               <span>Send</span>
@@ -543,3 +539,4 @@ export const CyberShieldChatbot: React.FC<CyberShieldChatbotProps> = ({
     </>
   );
 };
+

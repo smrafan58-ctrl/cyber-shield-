@@ -1,0 +1,261 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // =========================================================================
+    // 1. GLOBAL SAFETY NET (Default-Deny Catch-All)
+    // =========================================================================
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // =========================================================================
+    // 2. PRIMITIVE HELPERS
+    // =========================================================================
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // =========================================================================
+    // 3. ENTITY VALIDATION BLUEPRINTS (Anti-Update-Gap)
+    // =========================================================================
+    function isValidUserProfile(data) {
+      return data.keys().hasAll([
+          'uid',
+          'displayName',
+          'photoURL',
+          'scanCount',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'uid',
+          'displayName',
+          'photoURL',
+          'scanCount',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.uid is string
+        && data.uid.size() >= 1
+        && data.uid.size() <= 128
+        && data.uid.matches('^[a-zA-Z0-9_\\-]+$')
+        && data.uid == request.auth.uid
+        && data.displayName is string
+        && data.displayName.size() >= 1
+        && data.displayName.size() <= 120
+        && data.photoURL is string
+        && data.photoURL.size() <= 1024
+        && data.scanCount is int
+        && data.scanCount >= 0
+        && data.scanCount <= 100000
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidIndicatorArray(arr) {
+      return arr is list
+        && arr.size() <= 20
+        && (arr.size() == 0 || (arr[0] is string && arr[0].size() >= 1 && arr[0].size() <= 200));
+    }
+
+    function isValidScanRecord(data) {
+      return data.keys().hasAll([
+          'id',
+          'userId',
+          'normalizedUrl',
+          'redactedUrl',
+          'hostname',
+          'registrableDomain',
+          'subdomain',
+          'tld',
+          'protocol',
+          'port',
+          'path',
+          'urlLength',
+          'queryParamCount',
+          'riskScore',
+          'classification',
+          'summaryExplanation',
+          'indicatorNames',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id',
+          'userId',
+          'normalizedUrl',
+          'redactedUrl',
+          'hostname',
+          'registrableDomain',
+          'subdomain',
+          'tld',
+          'protocol',
+          'port',
+          'path',
+          'urlLength',
+          'queryParamCount',
+          'riskScore',
+          'classification',
+          'summaryExplanation',
+          'indicatorNames',
+          'createdAt',
+          'updatedAt'
+        ])
+        && isValidId(data.id)
+        && isValidId(data.userId)
+        && data.userId == request.auth.uid
+        && data.normalizedUrl is string
+        && data.normalizedUrl.size() >= 1
+        && data.normalizedUrl.size() <= 2048
+        && data.redactedUrl is string
+        && data.redactedUrl.size() >= 1
+        && data.redactedUrl.size() <= 2048
+        && data.hostname is string
+        && data.hostname.size() >= 1
+        && data.hostname.size() <= 255
+        && data.registrableDomain is string
+        && data.registrableDomain.size() >= 1
+        && data.registrableDomain.size() <= 255
+        && data.subdomain is string
+        && data.subdomain.size() >= 1
+        && data.subdomain.size() <= 255
+        && data.tld is string
+        && data.tld.size() >= 1
+        && data.tld.size() <= 64
+        && data.protocol is string
+        && data.protocol.size() <= 10
+        && (data.protocol == 'HTTP' || data.protocol == 'HTTPS')
+        && data.port is string
+        && data.port.size() >= 1
+        && data.port.size() <= 32
+        && data.path is string
+        && data.path.size() >= 1
+        && data.path.size() <= 1024
+        && data.urlLength is int
+        && data.urlLength >= 1
+        && data.urlLength <= 4096
+        && data.queryParamCount is int
+        && data.queryParamCount >= 0
+        && data.queryParamCount <= 200
+        && data.riskScore is int
+        && data.riskScore >= 0
+        && data.riskScore <= 100
+        && data.classification is string
+        && data.classification.size() <= 32
+        && (
+          data.classification == 'LOW RISK INDICATORS'
+          || data.classification == 'MILD SUSPICION'
+          || data.classification == 'MODERATE RISK'
+          || data.classification == 'HIGH RISK'
+          || data.classification == 'VERY HIGH RISK'
+        )
+        && data.summaryExplanation is string
+        && data.summaryExplanation.size() >= 1
+        && data.summaryExplanation.size() <= 1000
+        && isValidIndicatorArray(data.indicatorNames)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    // =========================================================================
+    // 4. COLLECTION: /users/{userId}
+    // =========================================================================
+    match /users/{userId} {
+      allow get: if isSignedIn() && isValidId(userId) && request.auth.uid == userId;
+      allow list: if false;
+
+      allow create: if isVerifiedUser()
+        && isValidId(userId)
+        && request.auth.uid == userId
+        && isValidUserProfile(incoming())
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+
+      allow update: if isVerifiedUser()
+        && isValidId(userId)
+        && isValidUserProfile(incoming())
+        && request.auth.uid == userId
+        && existing().uid == request.auth.uid
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'displayName',
+          'photoURL',
+          'scanCount',
+          'updatedAt'
+        ]);
+
+      allow delete: if false;
+    }
+
+    // =========================================================================
+    // 5. COLLECTION: /scans/{scanId}
+    // =========================================================================
+    match /scans/{scanId} {
+      allow get: if isSignedIn()
+        && isValidId(scanId)
+        && resource.data.userId == request.auth.uid;
+
+      allow list: if isSignedIn()
+        && resource.data.userId == request.auth.uid;
+
+      allow create: if isVerifiedUser()
+        && isValidId(scanId)
+        && isValidScanRecord(incoming())
+        && incoming().id == scanId
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && exists(/databases/$(database)/documents/users/$(incoming().userId));
+
+      allow update: if isVerifiedUser()
+        && isValidId(scanId)
+        && isValidScanRecord(incoming())
+        && existing().userId == request.auth.uid
+        && incoming().userId == existing().userId
+        && incoming().id == existing().id
+        && incoming().id == scanId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'normalizedUrl',
+          'redactedUrl',
+          'hostname',
+          'registrableDomain',
+          'subdomain',
+          'tld',
+          'protocol',
+          'port',
+          'path',
+          'urlLength',
+          'queryParamCount',
+          'riskScore',
+          'classification',
+          'summaryExplanation',
+          'indicatorNames',
+          'updatedAt'
+        ]);
+
+      allow delete: if isVerifiedUser()
+        && isValidId(scanId)
+        && existing().userId == request.auth.uid;
+    }
+  }
+}

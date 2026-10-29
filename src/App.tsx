@@ -3,8 +3,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Shield } from 'lucide-react';
+import { onAuthStateChanged, User } from 'firebase/auth';
 import { Navbar } from './components/Navbar';
 import { URLInputSection } from './components/URLInputSection';
 import { ScanResultsDashboard } from './components/ScanResultsDashboard';
@@ -16,6 +17,20 @@ import {
   saveScanHistoryToStorage,
   upsertScanHistoryList,
 } from './engine/scanHistoryStorage';
+import {
+  analyzeUrlViaJavaBackend,
+  clearScanHistoryOnJavaBackend,
+  fetchScanHistoryFromJavaBackend,
+} from './api/javaBackendClient';
+import {
+  auth,
+  deleteAllUserScansFromFirestore,
+  ensureUserProfileDocument,
+  saveScanToFirestore,
+  signInWithGooglePopup,
+  signOutUser,
+  subscribeToUserScans,
+} from './firebase';
 import { URLAnalysisResult } from './types/scanner';
 
 export default function App() {
@@ -30,8 +45,100 @@ export default function App() {
     loadScanHistoryFromStorage()
   );
   const [isChatOpen, setIsChatOpen] = useState<boolean>(false);
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
+  const [isAuthReady, setIsAuthReady] = useState<boolean>(false);
+  const [authStatusMessage, setAuthStatusMessage] = useState<string | null>(null);
 
   const inputRef = useRef<HTMLInputElement | null>(null);
+
+  // Track Firebase Authentication state
+  useEffect(() => {
+    const unsubscribeAuth = onAuthStateChanged(auth, (user) => {
+      setCurrentUser(user);
+      setIsAuthReady(true);
+      if (user) {
+        setAuthStatusMessage(null);
+        ensureUserProfileDocument(user).catch(() => {
+          // Handled via handleFirestoreError in firebase.ts
+        });
+      }
+    });
+    return () => unsubscribeAuth();
+  }, []);
+
+  // Attach Firestore real-time listener only when auth is ready and user is authenticated
+  useEffect(() => {
+    if (!isAuthReady || !currentUser) return;
+
+    // Backfill any local storage scans into the user's Firestore collection
+    const localItems = loadScanHistoryFromStorage();
+    for (const item of localItems) {
+      saveScanToFirestore(currentUser, item).catch(() => {
+        // Handled via handleFirestoreError
+      });
+    }
+
+    const unsubscribeScans = subscribeToUserScans(
+      currentUser,
+      (cloudScans) => {
+        if (cloudScans.length > 0) {
+          setScanHistory((prev) => {
+            let merged = [...prev];
+            for (let i = cloudScans.length - 1; i >= 0; i--) {
+              merged = upsertScanHistoryList(merged, cloudScans[i]);
+            }
+            saveScanHistoryToStorage(merged);
+            return merged;
+          });
+        }
+      },
+      (err) => {
+        if (err.message.includes('Quota exceeded')) {
+          setAuthStatusMessage(
+            'Firestore daily free-tier quota exceeded. Local scan history remains active and cloud quota resets tomorrow.'
+          );
+        }
+      }
+    );
+
+    return () => unsubscribeScans();
+  }, [isAuthReady, currentUser]);
+
+  // Initial fallback load from Java backend when unauthenticated and local storage is empty
+  useEffect(() => {
+    const localItems = loadScanHistoryFromStorage();
+    if (localItems.length === 0) {
+      fetchScanHistoryFromJavaBackend().then((javaItems) => {
+        if (javaItems.length > 0) {
+          setScanHistory(javaItems.slice(0, 5));
+          saveScanHistoryToStorage(javaItems.slice(0, 5));
+        }
+      });
+    }
+  }, []);
+
+  const handleGoogleSignIn = async () => {
+    setAuthStatusMessage(null);
+    try {
+      await signInWithGooglePopup();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (!msg.includes('auth/popup-closed-by-user')) {
+        setAuthStatusMessage(
+          'Google Sign-In could not be completed in this window. Please ensure popups are allowed and try again.'
+        );
+      }
+    }
+  };
+
+  const handleSignOut = async () => {
+    setAuthStatusMessage(null);
+    try {
+      await signOutUser();
+    } catch {
+      setAuthStatusMessage('Unable to sign out right now. Please try again.');
+    }
+  };
 
   const handleResetToScanner = () => {
     setUrlInput('');
@@ -49,16 +156,34 @@ export default function App() {
     inputRef.current?.focus();
   };
 
-  const handleSelectHistoryItem = (item: URLAnalysisResult) => {
+  const handleSelectHistoryItem = async (item: URLAnalysisResult) => {
     setValidationError(null);
     setUrlInput(item.domain.redactedUrl);
     setCurrentResult(item);
     window.scrollTo({ top: 0, behavior: 'smooth' });
+
+    // If item was hydrated from Firestore summary, refresh full deterministic indicator breakdown from Java backend
+    if (item.indicators.some((ind) => ind.id.startsWith('cloud-ind-'))) {
+      try {
+        const apiData = await analyzeUrlViaJavaBackend(item.domain.redactedUrl);
+        if (apiData.valid && apiData.result) {
+          setCurrentResult(apiData.result);
+        }
+      } catch {
+        // Keep hydrated result on screen
+      }
+    }
   };
 
   const handleClearHistory = () => {
     clearScanHistoryFromStorage();
+    clearScanHistoryOnJavaBackend();
     setScanHistory([]);
+    if (currentUser) {
+      deleteAllUserScansFromFirestore(currentUser).catch(() => {
+        // Handled via handleFirestoreError
+      });
+    }
   };
 
   const executeScan = async (overrideUrl?: string) => {
@@ -67,18 +192,7 @@ export default function App() {
     setIsScanning(true);
 
     try {
-      const apiRes = await fetch('/api/analyze', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: rawTarget }),
-      });
-
-      const apiData = (await apiRes.json()) as {
-        valid: boolean;
-        errorTitle?: string;
-        error?: string;
-        result?: URLAnalysisResult;
-      };
+      const apiData = await analyzeUrlViaJavaBackend(rawTarget);
 
       if (!apiData.valid) {
         setValidationError({
@@ -99,6 +213,11 @@ export default function App() {
           saveScanHistoryToStorage(updated);
           return updated;
         });
+        if (currentUser) {
+          saveScanToFirestore(currentUser, result).catch(() => {
+            // Handled via handleFirestoreError
+          });
+        }
         window.scrollTo({ top: 0, behavior: 'smooth' });
       }
     } catch {
@@ -113,18 +232,25 @@ export default function App() {
   };
 
   return (
-    <div className="min-h-screen flex flex-col bg-[#0B1120] text-slate-100">
+    <div
+      data-preferred-theme="light"
+      className="min-h-screen flex flex-col text-[#231710]"
+    >
       <Navbar
         onNewScan={handleResetToScanner}
         hasResult={Boolean(currentResult)}
         isChatOpen={isChatOpen}
         onToggleChat={() => setIsChatOpen((prev) => !prev)}
+        currentUser={currentUser}
+        isAuthReady={isAuthReady}
+        onGoogleSignIn={handleGoogleSignIn}
+        onSignOut={handleSignOut}
       />
 
       <main className="flex-1">
         {/* Strictly Two Views: URL Pasting Page & Risk Showing Page */}
         {!currentResult ? (
-          /* 1. URL Pasting Page (with Local Storage Last-5 Scan History below input) */
+          /* 1. URL Pasting Page (with Local Storage + Firestore Last-5 Scan History below input) */
           <URLInputSection
             urlInput={urlInput}
             onUrlInputChange={setUrlInput}
@@ -136,6 +262,9 @@ export default function App() {
             scanHistory={scanHistory}
             onSelectHistoryItem={handleSelectHistoryItem}
             onClearHistory={handleClearHistory}
+            isAuthenticated={Boolean(currentUser)}
+            onGoogleSignIn={handleGoogleSignIn}
+            authStatusMessage={authStatusMessage}
           />
         ) : (
           /* 2. Risk Showing Page */
@@ -153,15 +282,17 @@ export default function App() {
         activeScanResult={currentResult}
       />
 
-      <footer className="border-t border-slate-800/80 bg-[#0B1120] py-6 mt-12">
-        <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 flex flex-col sm:flex-row items-center justify-between gap-4 text-xs text-slate-400">
-          <div className="flex items-center gap-2">
-            <Shield className="h-4 w-4 text-sky-400 shrink-0" aria-hidden="true" />
-            <span className="font-semibold text-slate-200">CyberShield AI</span>
+      <footer className="border-t border-[#EEDBC8] bg-[#FFFDF9] py-7 mt-12">
+        <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 flex flex-col sm:flex-row items-center justify-between gap-4 text-xs text-[#7A5C49]">
+          <div className="flex items-center gap-2.5">
+            <Shield className="h-4 w-4 text-[#C85A32] shrink-0" aria-hidden="true" />
+            <span className="font-display font-bold text-sm text-[#231710]">
+              CyberShield AI
+            </span>
             <span aria-hidden="true">·</span>
-            <span>URL Threat Detection (Java 17 Backend)</span>
+            <span>URL Threat Detection (Java 17 Backend · Firebase Cloud Sync)</span>
           </div>
-          <p className="max-w-xl text-center sm:text-right text-slate-400">
+          <p className="max-w-xl text-center sm:text-right text-[#7A5C49] leading-relaxed">
             {MANDATORY_DISCLAIMER}
           </p>
         </div>
@@ -169,3 +300,4 @@ export default function App() {
     </div>
   );
 }
+

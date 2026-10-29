@@ -61,7 +61,16 @@ public class CyberShieldServerTest {
         assertTrue(transcribePayload.contains("\"mimeType\":\"audio/webm\""), "Transcribe payload must include audio mimeType");
         assertTrue(transcribePayload.contains("Transcribe this audio."), "Transcribe payload must include transcription instruction");
 
-        System.out.println("PASS: All 8 Java Backend URL Analysis, Gemini Multi-Turn Chat & Audio Transcription assertions passed!");
+        // 9. ScanHistoryJavaStore caps at 5 analyzed URLs and deduplicates
+        CyberShieldServer.HISTORY_STORE.clear();
+        for (int i = 1; i <= 7; i++) {
+            CyberShieldServer.analyzeUrlInJava("https://site" + i + ".example.com");
+        }
+        assertTrue(CyberShieldServer.HISTORY_STORE.size() == 5, "Java ScanHistoryJavaStore must cap strictly at 5 analyzed URLs");
+        String historyJson = CyberShieldServer.HISTORY_STORE.toJsonArray();
+        assertTrue(historyJson.contains("site7.example.com") && !historyJson.contains("site1.example.com"), "Java ScanHistoryJavaStore must retain newest 5 items");
+
+        System.out.println("PASS: All 9 Java Backend URL Analysis, History Store, Gemini Multi-Turn Chat & Audio Transcription assertions passed!");
     }
 
     private static void assertTrue(boolean condition, String message) {

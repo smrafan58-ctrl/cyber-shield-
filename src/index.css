@@ -3,21 +3,83 @@
 @layer base {
   :root {
     --font-sans: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+    --font-display: 'Playfair Display', Georgia, serif;
     --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace;
+    --color-bg: #FBF6EF;
+    --color-bg-card: #FFFDF9;
+    --color-bg-secondary: #FDF5EB;
+    --color-champagne: #FDECD8;
+    --color-border: #EEDBC8;
+    --color-brand: #C85A32;
+    --color-brand-hover: #A94622;
+    --color-amber: #D97724;
+    --color-ink: #231710;
+    --color-muted: #7A5C49;
+    color-scheme: light;
+  }
+
+  html {
+    scroll-behavior: smooth;
   }
 
   body {
     font-family: var(--font-sans);
-    background-color: #0B1120;
-    color: #F1F5F9;
+    background-color: var(--color-bg);
+    background-image:
+      radial-gradient(ellipse 85% 45% at 50% -5%, rgba(236, 148, 92, 0.16), transparent 70%),
+      radial-gradient(ellipse 60% 40% at 90% 100%, rgba(217, 119, 36, 0.08), transparent 70%);
+    background-attachment: fixed;
+    color: var(--color-ink);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  ::selection {
+    background-color: #F9DFC2;
+    color: #231710;
   }
 
   code, pre, .font-mono {
     font-family: var(--font-mono);
     font-variant-numeric: tabular-nums;
   }
+
+  .font-display {
+    font-family: var(--font-display);
+  }
 }
 
 .tabular-nums {
   font-variant-numeric: tabular-nums;
 }
+
+.bg-editorial-grid {
+  background-color: #FDECD8;
+  background-image:
+    radial-gradient(circle at 50% 0%, rgba(255, 252, 247, 0.72) 0%, transparent 68%),
+    radial-gradient(rgba(184, 93, 45, 0.16) 1px, transparent 1px),
+    linear-gradient(135deg, #FFF1E0 0%, #FDE6CB 50%, #F9D8B6 100%);
+  background-size: 100% 100%, 24px 24px, 100% 100%;
+}
+
+.bg-warm-cta {
+  background-image: linear-gradient(135deg, #D16036 0%, #B84A24 100%);
+}
+
+.bg-warm-cta:hover {
+  background-image: linear-gradient(135deg, #B84A24 0%, #9E3C1B 100%);
+}
+
+.shadow-editorial {
+  box-shadow:
+    0 16px 38px -10px rgba(124, 58, 28, 0.085),
+    0 3px 8px -2px rgba(124, 58, 28, 0.045);
+}
+
+.shadow-editorial-lg {
+  box-shadow:
+    0 24px 54px -12px rgba(124, 58, 28, 0.16),
+    0 6px 16px -3px rgba(124, 58, 28, 0.08);
+}
+
+

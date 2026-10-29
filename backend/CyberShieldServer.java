@@ -82,6 +82,8 @@ public class CyberShieldServer {
     private static final HttpClient HTTP_CLIENT = HttpClient.newBuilder()
         .connectTimeout(Duration.ofMillis(3000))
         .build();
+    public static final ScanHistoryJavaStore HISTORY_STORE = new ScanHistoryJavaStore();
+    private static final GeminiJavaService GEMINI_SERVICE = new GeminiJavaService(HTTP_CLIENT);
 
     private static class RateBucket {
         int count;
@@ -176,6 +178,7 @@ public class CyberShieldServer {
         server.createContext("/api/reputation/status", new ReputationStatusHandler());
         server.createContext("/api/reputation/check", new ReputationCheckHandler());
         server.createContext("/api/analyze", new AnalyzeUrlHandler());
+        server.createContext("/api/history", new ScanHistoryHandler());
         server.createContext("/api/chat", new ChatHandler());
         server.createContext("/api/transcribe", new TranscribeAudioHandler());
         server.createContext("/", new StaticFileHandler(distDir));
@@ -544,6 +547,29 @@ public class CyberShieldServer {
         }
     }
 
+    static class ScanHistoryHandler implements HttpHandler {
+        @Override
+        public void handle(HttpExchange exchange) throws IOException {
+            String method = exchange.getRequestMethod();
+            if ("GET".equalsIgnoreCase(method)) {
+                String json = "{"
+                    + "\"count\":" + HISTORY_STORE.size() + ","
+                    + "\"maxItems\":" + ScanHistoryJavaStore.MAX_HISTORY_ITEMS + ","
+                    + "\"backend\":\"Java 17 ScanHistoryJavaStore\","
+                    + "\"history\":" + HISTORY_STORE.toJsonArray()
+                    + "}";
+                sendJson(exchange, 200, json);
+                return;
+            }
+            if ("DELETE".equalsIgnoreCase(method)) {
+                HISTORY_STORE.clear();
+                sendJson(exchange, 200, "{\"cleared\":true,\"count\":0}");
+                return;
+            }
+            sendJson(exchange, 405, "{\"error\":\"Method not allowed\"}");
+        }
+    }
+
     public static class ChatTurn {
         public final String role;
         public final String text;
@@ -680,10 +706,10 @@ public class CyberShieldServer {
             String replyText = null;
 
             if (apiKey != null && !apiKey.isBlank() && !"MY_GEMINI_API_KEY".equals(apiKey.trim())) {
-                replyText = callGeminiModel(usedModel, apiKey.trim(), payload);
+                replyText = GEMINI_SERVICE.generateContent(usedModel, apiKey.trim(), payload);
                 if (replyText == null && !"gemini-3.8-flash".equals(usedModel)) {
                     usedModel = "gemini-3.8-flash";
-                    replyText = callGeminiModel(usedModel, apiKey.trim(), payload);
+                    replyText = GEMINI_SERVICE.generateContent(usedModel, apiKey.trim(), payload);
                 }
             }
 
@@ -700,29 +726,9 @@ public class CyberShieldServer {
                 + "}";
             sendJson(exchange, 200, responseJson);
         }
-
-        private String callGeminiModel(String model, String apiKey, String payload) {
-            try {
-                String endpoint = "https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent";
-                HttpRequest req = HttpRequest.newBuilder()
-                    .uri(URI.create(endpoint))
-                    .timeout(Duration.ofMillis(1800))
-                    .header("Content-Type", "application/json")
-                    .header("x-goog-api-key", apiKey)
-                    .header("User-Agent", "aistudio-build")
-                    .POST(HttpRequest.BodyPublishers.ofString(payload, StandardCharsets.UTF_8))
-                    .build();
-                HttpResponse<String> resp = HTTP_CLIENT.send(req, HttpResponse.BodyHandlers.ofString());
-                if (resp.statusCode() == 200) {
-                    return extractGeminiCandidateText(resp.body());
-                }
-            } catch (Exception ignored) {
-            }
-            return null;
-        }
     }
 
-    public static final String GEMINI_TRANSCRIBE_MODEL = "gemini-3.5-transcribe";
+    public static final String GEMINI_TRANSCRIBE_MODEL = GeminiJavaService.TRANSCRIBE_MODEL;
 
     public static String buildGeminiTranscribePayload(String base64Audio, String mimeType, String prompt) {
         String safeMime = (mimeType == null || mimeType.isBlank()) ? "audio/webm" : mimeType.trim();
@@ -782,7 +788,7 @@ public class CyberShieldServer {
             }
 
             String payload = buildGeminiTranscribePayload(base64Audio.trim(), mimeType, prompt);
-            String transcript = callGeminiTranscribe(apiKey.trim(), payload);
+            String transcript = GEMINI_SERVICE.transcribeAudio(apiKey.trim(), payload);
 
             if (transcript == null || transcript.isBlank()) {
                 transcript = "url".equalsIgnoreCase(mode)
@@ -796,26 +802,6 @@ public class CyberShieldServer {
                 + "\"timestamp\":\"" + Instant.now().toString() + "\""
                 + "}";
             sendJson(exchange, 200, responseJson);
-        }
-
-        private String callGeminiTranscribe(String apiKey, String payload) {
-            try {
-                String endpoint = "https://generativelanguage.googleapis.com/v1beta/models/" + GEMINI_TRANSCRIBE_MODEL + ":generateContent";
-                HttpRequest req = HttpRequest.newBuilder()
-                    .uri(URI.create(endpoint))
-                    .timeout(Duration.ofMillis(1800))
-                    .header("Content-Type", "application/json")
-                    .header("x-goog-api-key", apiKey)
-                    .header("User-Agent", "aistudio-build")
-                    .POST(HttpRequest.BodyPublishers.ofString(payload, StandardCharsets.UTF_8))
-                    .build();
-                HttpResponse<String> resp = HTTP_CLIENT.send(req, HttpResponse.BodyHandlers.ofString());
-                if (resp.statusCode() == 200) {
-                    return extractGeminiCandidateText(resp.body());
-                }
-            } catch (Exception ignored) {
-            }
-            return null;
         }
     }
 
@@ -1538,10 +1524,7 @@ public class CyberShieldServer {
         rulesJson.append("]");
 
         String resultId = "scan_java_" + System.currentTimeMillis();
-        return "{"
-            + "\"valid\":true,"
-            + "\"backendEngine\":\"Java " + jsonEscape(System.getProperty("java.version", "17")) + "\","
-            + "\"result\":{"
+        String resultObjectJson = "{"
             + "\"id\":\"" + resultId + "\","
             + "\"timestamp\":\"" + Instant.now().toString() + "\","
             + "\"riskScore\":" + riskScore + ","
@@ -1574,7 +1557,14 @@ public class CyberShieldServer {
             + "\"primaryAdvice\":\"" + jsonEscape(primaryAdvice) + "\","
             + "\"universalRules\":" + rulesJson
             + "}"
-            + "}"
+            + "}";
+
+        HISTORY_STORE.recordResult(resultObjectJson);
+
+        return "{"
+            + "\"valid\":true,"
+            + "\"backendEngine\":\"Java " + jsonEscape(System.getProperty("java.version", "17")) + "\","
+            + "\"result\":" + resultObjectJson
             + "}";
     }
 }
