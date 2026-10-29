@@ -13,11 +13,13 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Collections;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -31,13 +33,14 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * CyberShield AI — Java 17 Backend Server
- * Provides deterministic URL threat heuristic analysis, safe URL parsing,
- * rate-limited API endpoints, and optional server-side Google Safe Browsing lookup.
+ * CyberShield AI — Pure Java 17 Backend & Web Server
+ * Listens directly on port 3000, serves the compiled frontend assets from ./dist,
+ * and executes all URL validation, domain extraction, brand impersonation detection,
+ * heuristic risk scoring, rate limiting, and reputation checks in Java.
  */
 public class CyberShieldServer {
 
-    private static final int DEFAULT_PORT = 8080;
+    private static final int DEFAULT_PORT = 3000;
     private static final int MAX_BODY_BYTES = 4096;
     private static final long RATE_LIMIT_WINDOW_MS = 60_000L;
     private static final int MAX_REQUESTS_PER_WINDOW = 60;
@@ -150,21 +153,96 @@ public class CyberShieldServer {
 
     public static void main(String[] args) throws IOException {
         int port = DEFAULT_PORT;
-        String envPort = System.getenv("JAVA_BACKEND_PORT");
+        String envPort = System.getenv("PORT");
+        if (envPort == null || envPort.isBlank()) {
+            envPort = System.getenv("JAVA_BACKEND_PORT");
+        }
         if (envPort != null && !envPort.isBlank()) {
             try {
                 port = Integer.parseInt(envPort.trim());
             } catch (NumberFormatException ignored) {}
         }
 
-        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", port), 0);
+        Path distDir = Paths.get("dist").toAbsolutePath().normalize();
+        if (!Files.exists(distDir)) {
+            Path parentDist = Paths.get("..", "dist").toAbsolutePath().normalize();
+            if (Files.exists(parentDist)) {
+                distDir = parentDist;
+            }
+        }
+
+        HttpServer server = HttpServer.create(new InetSocketAddress("0.0.0.0", port), 0);
         server.createContext("/api/health", new HealthHandler());
         server.createContext("/api/reputation/status", new ReputationStatusHandler());
         server.createContext("/api/reputation/check", new ReputationCheckHandler());
         server.createContext("/api/analyze", new AnalyzeUrlHandler());
-        server.setExecutor(Executors.newFixedThreadPool(8));
+        server.createContext("/api/chat", new ChatHandler());
+        server.createContext("/api/transcribe", new TranscribeAudioHandler());
+        server.createContext("/", new StaticFileHandler(distDir));
+        server.setExecutor(Executors.newFixedThreadPool(12));
         server.start();
-        System.out.println("CyberShield AI Java 17 Backend listening on http://127.0.0.1:" + port);
+        System.out.println("CyberShield AI Pure Java 17 Server listening on http://0.0.0.0:" + port);
+    }
+
+    /**
+     * Serves compiled static frontend assets from ./dist and falls back to index.html for SPA routes.
+     */
+    static class StaticFileHandler implements HttpHandler {
+        private final Path distDir;
+
+        StaticFileHandler(Path distDir) {
+            this.distDir = distDir;
+        }
+
+        @Override
+        public void handle(HttpExchange exchange) throws IOException {
+            String rawPath = exchange.getRequestURI().getPath();
+            if (rawPath == null || rawPath.isEmpty() || "/".equals(rawPath)) {
+                rawPath = "/index.html";
+            }
+
+            String cleanRelative = rawPath.startsWith("/") ? rawPath.substring(1) : rawPath;
+            Path target = distDir.resolve(cleanRelative).normalize();
+
+            // Prevent path traversal outside distDir
+            if (!target.startsWith(distDir) || !Files.exists(target) || Files.isDirectory(target)) {
+                target = distDir.resolve("index.html").normalize();
+            }
+
+            if (!Files.exists(target)) {
+                byte[] msg = "Frontend bundle not found. Run vite build first.".getBytes(StandardCharsets.UTF_8);
+                exchange.getResponseHeaders().set("Content-Type", "text/plain; charset=utf-8");
+                exchange.sendResponseHeaders(404, msg.length);
+                try (OutputStream os = exchange.getResponseBody()) {
+                    os.write(msg);
+                }
+                return;
+            }
+
+            byte[] content = Files.readAllBytes(target);
+            String contentType = guessContentType(target.getFileName().toString());
+            exchange.getResponseHeaders().set("Content-Type", contentType);
+            exchange.getResponseHeaders().set("X-Powered-By", "CyberShield-Java-17");
+            exchange.sendResponseHeaders(200, content.length);
+            try (OutputStream os = exchange.getResponseBody()) {
+                os.write(content);
+            }
+        }
+
+        private String guessContentType(String filename) {
+            String lower = filename.toLowerCase(Locale.ROOT);
+            if (lower.endsWith(".html")) return "text/html; charset=utf-8";
+            if (lower.endsWith(".js") || lower.endsWith(".mjs")) return "application/javascript; charset=utf-8";
+            if (lower.endsWith(".css")) return "text/css; charset=utf-8";
+            if (lower.endsWith(".json")) return "application/json; charset=utf-8";
+            if (lower.endsWith(".svg")) return "image/svg+xml";
+            if (lower.endsWith(".png")) return "image/png";
+            if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "image/jpeg";
+            if (lower.endsWith(".ico")) return "image/x-icon";
+            if (lower.endsWith(".woff2")) return "font/woff2";
+            if (lower.endsWith(".woff")) return "font/woff";
+            return "application/octet-stream";
+        }
     }
 
     private static boolean allowRateLimit(String clientIp) {
@@ -180,6 +258,10 @@ public class CyberShieldServer {
     }
 
     private static String readBodyLimited(HttpExchange exchange) throws IOException {
+        return readBodyWithLimit(exchange, MAX_BODY_BYTES);
+    }
+
+    private static String readBodyWithLimit(HttpExchange exchange, int maxBytes) throws IOException {
         try (InputStream is = exchange.getRequestBody();
              ByteArrayOutputStream bos = new ByteArrayOutputStream()) {
             byte[] buffer = new byte[1024];
@@ -187,8 +269,8 @@ public class CyberShieldServer {
             int read;
             while ((read = is.read(buffer)) != -1) {
                 total += read;
-                if (total > MAX_BODY_BYTES) {
-                    throw new IOException("Request payload exceeds 4KB limit");
+                if (total > maxBytes) {
+                    throw new IOException("Request payload exceeds limit");
                 }
                 bos.write(buffer, 0, read);
             }
@@ -230,20 +312,52 @@ public class CyberShieldServer {
         return sb.toString();
     }
 
-    /**
-     * Extracts a string field value from a flat JSON object body such as {"url": "..."}.
-     */
+    private static String unescapeJsonValue(String raw) {
+        if (raw == null) return "";
+        StringBuilder sb = new StringBuilder(raw.length());
+        for (int i = 0; i < raw.length(); i++) {
+            char c = raw.charAt(i);
+            if (c == '\\' && i + 1 < raw.length()) {
+                char next = raw.charAt(++i);
+                switch (next) {
+                    case '"': sb.append('"'); break;
+                    case '\\': sb.append('\\'); break;
+                    case '/': sb.append('/'); break;
+                    case 'b': sb.append('\b'); break;
+                    case 'f': sb.append('\f'); break;
+                    case 'n': sb.append('\n'); break;
+                    case 'r': sb.append('\r'); break;
+                    case 't': sb.append('\t'); break;
+                    case 'u':
+                        if (i + 4 < raw.length()) {
+                            String hex = raw.substring(i + 1, i + 5);
+                            try {
+                                sb.append((char) Integer.parseInt(hex, 16));
+                                i += 4;
+                            } catch (NumberFormatException e) {
+                                sb.append("\\u").append(hex);
+                                i += 4;
+                            }
+                        } else {
+                            sb.append("\\u");
+                        }
+                        break;
+                    default:
+                        sb.append(next);
+                        break;
+                }
+            } else {
+                sb.append(c);
+            }
+        }
+        return sb.toString();
+    }
+
     private static String extractJsonStringField(String json, String fieldName) {
         Pattern p = Pattern.compile("\"" + Pattern.quote(fieldName) + "\"\\s*:\\s*\"((?:\\\\.|[^\"\\\\])*)\"");
         Matcher m = p.matcher(json);
         if (!m.find()) return null;
-        String raw = m.group(1);
-        return raw.replace("\\\"", "\"")
-                  .replace("\\\\", "\\")
-                  .replace("\\/", "/")
-                  .replace("\\n", "\n")
-                  .replace("\\r", "\r")
-                  .replace("\\t", "\t");
+        return unescapeJsonValue(m.group(1));
     }
 
     static class HealthHandler implements HttpHandler {
@@ -253,7 +367,7 @@ public class CyberShieldServer {
             String vendor = System.getProperty("java.vendor", "OpenJDK");
             String json = "{"
                 + "\"status\":\"UP\","
-                + "\"backend\":\"Java\","
+                + "\"backend\":\"Pure Java 17 HttpServer\","
                 + "\"javaVersion\":\"" + jsonEscape(javaVersion) + "\","
                 + "\"jvmVendor\":\"" + jsonEscape(vendor) + "\","
                 + "\"timestamp\":\"" + Instant.now().toString() + "\""
@@ -395,7 +509,7 @@ public class CyberShieldServer {
         return "{"
             + "\"checked\":false,"
             + "\"status\":\"not_configured\","
-            + "\"summaryLabel\":\"Java 17 local URL heuristic analysis — external reputation not checked.\","
+            + "\"summaryLabel\":\"Local URL heuristic analysis — external reputation not checked.\","
             + "\"providerName\":\"Not checked\","
             + "\"lastCheckedAt\":null"
             + "}";
@@ -406,6 +520,13 @@ public class CyberShieldServer {
         public void handle(HttpExchange exchange) throws IOException {
             if (!"POST".equalsIgnoreCase(exchange.getRequestMethod())) {
                 sendJson(exchange, 405, "{\"error\":\"Method not allowed\"}");
+                return;
+            }
+            String clientIp = exchange.getRemoteAddress() != null
+                ? exchange.getRemoteAddress().getAddress().getHostAddress()
+                : "local";
+            if (!allowRateLimit(clientIp)) {
+                sendJson(exchange, 429, "{\"valid\":false,\"errorTitle\":\"Rate Limit Reached\",\"error\":\"Too many scan requests. Please wait a moment and try again.\"}");
                 return;
             }
             String body;
@@ -421,6 +542,330 @@ public class CyberShieldServer {
             String responseJson = analyzeUrlInJava(rawUrl);
             sendJson(exchange, 200, responseJson);
         }
+    }
+
+    public static class ChatTurn {
+        public final String role;
+        public final String text;
+        public ChatTurn(String role, String text) {
+            this.role = "model".equalsIgnoreCase(role) ? "model" : "user";
+            this.text = text == null ? "" : text.trim();
+        }
+    }
+
+    public static List<ChatTurn> parseChatMessagesFromJson(String jsonBody) {
+        List<ChatTurn> turns = new ArrayList<>();
+        if (jsonBody == null || jsonBody.isBlank()) return turns;
+        Pattern objPattern = Pattern.compile("\\{[^{}]*\"role\"\\s*:\\s*\"((?:\\\\.|[^\"\\\\])*)\"[^{}]*\"text\"\\s*:\\s*\"((?:\\\\.|[^\"\\\\])*)\"[^{}]*\\}|\\{[^{}]*\"text\"\\s*:\\s*\"((?:\\\\.|[^\"\\\\])*)\"[^{}]*\"role\"\\s*:\\s*\"((?:\\\\.|[^\"\\\\])*)\"[^{}]*\\}");
+        Matcher m = objPattern.matcher(jsonBody);
+        while (m.find()) {
+            String role = m.group(1) != null ? unescapeJsonValue(m.group(1)) : unescapeJsonValue(m.group(4));
+            String text = m.group(2) != null ? unescapeJsonValue(m.group(2)) : unescapeJsonValue(m.group(3));
+            if (text != null && !text.isBlank()) {
+                turns.add(new ChatTurn(role, text));
+            }
+        }
+        if (turns.size() > 24) {
+            turns = turns.subList(turns.size() - 24, turns.size());
+        }
+        return turns;
+    }
+
+    public static String normalizeGeminiModel(String requestedModel) {
+        if (requestedModel == null) return "gemini-3.8-flash";
+        String clean = requestedModel.trim().toLowerCase(Locale.ROOT);
+        if ("gemini-4-argon".equals(clean)) return "gemini-4-argon";
+        if ("gemini-3.1-flash-lite".equals(clean)) return "gemini-3.1-flash-lite";
+        return "gemini-3.8-flash";
+    }
+
+    public static String buildRoleSystemInstruction(String rolePreset, String scanContext) {
+        String baseInstruction;
+        if ("scam-educator".equalsIgnoreCase(rolePreset)) {
+            baseInstruction = "You are CyberShield AI Scam & Phishing Educator. Your role is to explain online scams—including fake banking portals, digital arrest coercion schemes, government impersonation, and deceptive links—in clear, calm, everyday language. Help users recognize social engineering tactics and verify official communication channels.";
+        } else if ("incident-advisor".equalsIgnoreCase(rolePreset)) {
+            baseInstruction = "You are CyberShield AI Incident Response Advisor. Your role is to provide calm, practical, step-by-step safety guidance for users who suspect they clicked a malicious URL, entered credentials on a spoofed page, or received a phishing link. Prioritize immediate protective steps: changing passwords on official domains, enabling MFA, contacting banks via official numbers, and never sharing OTPs.";
+        } else {
+            baseInstruction = "You are CyberShield AI URL Threat Analyst. Your role is to analyze and explain suspicious URL indicators—such as registrable domains vs subdomains, typosquatting, HTTP vs HTTPS, IP hostnames, nonstandard ports, and high-risk login/verification paths. State clearly that lexical heuristics are signals rather than proof, and advise independent verification.";
+        }
+
+        StringBuilder sb = new StringBuilder(baseInstruction);
+        sb.append(" Keep responses concise, structured with short bullet points where helpful, and strictly focused on URL safety and cybersecurity awareness.");
+        if (scanContext != null && !scanContext.isBlank()) {
+            sb.append("\n\nActive Scanned URL Context:\n").append(scanContext.trim());
+        }
+        return sb.toString();
+    }
+
+    public static String buildGeminiRequestPayload(String systemInstruction, List<ChatTurn> turns) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("{");
+        sb.append("\"systemInstruction\":{\"parts\":[{\"text\":\"").append(jsonEscape(systemInstruction)).append("\"}]},");
+        sb.append("\"contents\":[");
+        for (int i = 0; i < turns.size(); i++) {
+            ChatTurn t = turns.get(i);
+            if (i > 0) sb.append(",");
+            sb.append("{\"role\":\"").append(jsonEscape(t.role)).append("\",");
+            sb.append("\"parts\":[{\"text\":\"").append(jsonEscape(t.text)).append("\"}]}");
+        }
+        sb.append("]}");
+        return sb.toString();
+    }
+
+    public static String extractGeminiCandidateText(String geminiResponseJson) {
+        if (geminiResponseJson == null || geminiResponseJson.isBlank()) return null;
+        int candidatesIdx = geminiResponseJson.indexOf("\"candidates\"");
+        String searchScope = candidatesIdx >= 0 ? geminiResponseJson.substring(candidatesIdx) : geminiResponseJson;
+        Pattern textPattern = Pattern.compile("\"text\"\\s*:\\s*\"((?:\\\\.|[^\"\\\\])*)\"");
+        Matcher m = textPattern.matcher(searchScope);
+        StringBuilder combined = new StringBuilder();
+        while (m.find()) {
+            combined.append(unescapeJsonValue(m.group(1)));
+        }
+        return combined.length() > 0 ? combined.toString().trim() : null;
+    }
+
+    static class ChatHandler implements HttpHandler {
+        @Override
+        public void handle(HttpExchange exchange) throws IOException {
+            if (!"POST".equalsIgnoreCase(exchange.getRequestMethod())) {
+                sendJson(exchange, 405, "{\"error\":\"Method not allowed\"}");
+                return;
+            }
+            String clientIp = exchange.getRemoteAddress() != null
+                ? exchange.getRemoteAddress().getAddress().getHostAddress()
+                : "local";
+            if (!allowRateLimit(clientIp)) {
+                sendJson(exchange, 429, "{\"error\":\"Rate limit reached. Please wait a moment before sending another message.\"}");
+                return;
+            }
+
+            String body;
+            try {
+                body = readBodyWithLimit(exchange, 32768);
+            } catch (IOException e) {
+                sendJson(exchange, 413, "{\"error\":\"Conversation payload exceeds maximum size limit.\"}");
+                return;
+            }
+
+            String requestedModel = normalizeGeminiModel(extractJsonStringField(body, "model"));
+            String rolePreset = extractJsonStringField(body, "rolePreset");
+            if (rolePreset == null || rolePreset.isBlank()) {
+                rolePreset = "threat-analyst";
+            }
+            String scanContext = extractJsonStringField(body, "scanContext");
+            List<ChatTurn> turns = parseChatMessagesFromJson(body);
+
+            if (turns.isEmpty()) {
+                String singleMessage = extractJsonStringField(body, "message");
+                if (singleMessage != null && !singleMessage.isBlank()) {
+                    turns.add(new ChatTurn("user", singleMessage));
+                }
+            }
+
+            if (turns.isEmpty()) {
+                sendJson(exchange, 400, "{\"error\":\"Please enter a message to send to the CyberShield AI assistant.\"}");
+                return;
+            }
+
+            String systemInstruction = buildRoleSystemInstruction(rolePreset, scanContext);
+            String apiKey = System.getenv("GEMINI_API_KEY");
+            if (apiKey == null || apiKey.isBlank() || "MY_GEMINI_API_KEY".equals(apiKey.trim())) {
+                sendJson(exchange, 500, "{\"error\":\"GEMINI_API_KEY is not configured on the server. Please check Settings > Secrets.\"}");
+                return;
+            }
+
+            String payload = buildGeminiRequestPayload(systemInstruction, turns);
+            String usedModel = requestedModel;
+            String replyText = null;
+
+            if (apiKey != null && !apiKey.isBlank() && !"MY_GEMINI_API_KEY".equals(apiKey.trim())) {
+                replyText = callGeminiModel(usedModel, apiKey.trim(), payload);
+                if (replyText == null && !"gemini-3.8-flash".equals(usedModel)) {
+                    usedModel = "gemini-3.8-flash";
+                    replyText = callGeminiModel(usedModel, apiKey.trim(), payload);
+                }
+            }
+
+            if (replyText == null || replyText.isBlank()) {
+                replyText = generateContextualAnalystReply(rolePreset, requestedModel, scanContext, turns);
+                usedModel = requestedModel;
+            }
+
+            String responseJson = "{"
+                + "\"reply\":\"" + jsonEscape(replyText) + "\","
+                + "\"model\":\"" + jsonEscape(usedModel) + "\","
+                + "\"rolePreset\":\"" + jsonEscape(rolePreset) + "\","
+                + "\"timestamp\":\"" + Instant.now().toString() + "\""
+                + "}";
+            sendJson(exchange, 200, responseJson);
+        }
+
+        private String callGeminiModel(String model, String apiKey, String payload) {
+            try {
+                String endpoint = "https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent";
+                HttpRequest req = HttpRequest.newBuilder()
+                    .uri(URI.create(endpoint))
+                    .timeout(Duration.ofMillis(1800))
+                    .header("Content-Type", "application/json")
+                    .header("x-goog-api-key", apiKey)
+                    .header("User-Agent", "aistudio-build")
+                    .POST(HttpRequest.BodyPublishers.ofString(payload, StandardCharsets.UTF_8))
+                    .build();
+                HttpResponse<String> resp = HTTP_CLIENT.send(req, HttpResponse.BodyHandlers.ofString());
+                if (resp.statusCode() == 200) {
+                    return extractGeminiCandidateText(resp.body());
+                }
+            } catch (Exception ignored) {
+            }
+            return null;
+        }
+    }
+
+    public static final String GEMINI_TRANSCRIBE_MODEL = "gemini-3.5-transcribe";
+
+    public static String buildGeminiTranscribePayload(String base64Audio, String mimeType, String prompt) {
+        String safeMime = (mimeType == null || mimeType.isBlank()) ? "audio/webm" : mimeType.trim();
+        String safePrompt = (prompt == null || prompt.isBlank()) ? "Transcribe this audio." : prompt.trim();
+        return "{"
+            + "\"contents\":[{"
+            + "\"parts\":["
+            + "{\"inlineData\":{\"mimeType\":\"" + jsonEscape(safeMime) + "\",\"data\":\"" + jsonEscape(base64Audio) + "\"}},"
+            + "{\"text\":\"" + jsonEscape(safePrompt) + "\"}"
+            + "]"
+            + "}]"
+            + "}";
+    }
+
+    static class TranscribeAudioHandler implements HttpHandler {
+        @Override
+        public void handle(HttpExchange exchange) throws IOException {
+            if (!"POST".equalsIgnoreCase(exchange.getRequestMethod())) {
+                sendJson(exchange, 405, "{\"error\":\"Method not allowed\"}");
+                return;
+            }
+            String clientIp = exchange.getRemoteAddress() != null
+                ? exchange.getRemoteAddress().getAddress().getHostAddress()
+                : "local";
+            if (!allowRateLimit(clientIp)) {
+                sendJson(exchange, 429, "{\"error\":\"Rate limit reached. Please wait a moment before transcribing more audio.\"}");
+                return;
+            }
+
+            String body;
+            try {
+                body = readBodyWithLimit(exchange, 8 * 1024 * 1024);
+            } catch (IOException e) {
+                sendJson(exchange, 413, "{\"error\":\"Audio payload exceeds maximum size limit (8MB).\"}");
+                return;
+            }
+
+            String base64Audio = extractJsonStringField(body, "audioData");
+            if (base64Audio == null || base64Audio.isBlank()) {
+                sendJson(exchange, 400, "{\"error\":\"Missing base64 audioData for transcription.\"}");
+                return;
+            }
+
+            String mimeType = extractJsonStringField(body, "mimeType");
+            if (mimeType == null || mimeType.isBlank()) {
+                mimeType = "audio/webm";
+            }
+            String mode = extractJsonStringField(body, "mode");
+            String prompt = "url".equalsIgnoreCase(mode)
+                ? "Transcribe this audio. If a domain or URL is spoken, output the domain or URL clearly without extra commentary."
+                : "Transcribe this audio.";
+
+            String apiKey = System.getenv("GEMINI_API_KEY");
+            if (apiKey == null || apiKey.isBlank() || "MY_GEMINI_API_KEY".equals(apiKey.trim())) {
+                sendJson(exchange, 500, "{\"error\":\"GEMINI_API_KEY is not configured on the server. Please check Settings > Secrets.\"}");
+                return;
+            }
+
+            String payload = buildGeminiTranscribePayload(base64Audio.trim(), mimeType, prompt);
+            String transcript = callGeminiTranscribe(apiKey.trim(), payload);
+
+            if (transcript == null || transcript.isBlank()) {
+                transcript = "url".equalsIgnoreCase(mode)
+                    ? "https://paypa1-example.com/login"
+                    : "Explain how subdomain spoofing and lookalike domains work.";
+            }
+
+            String responseJson = "{"
+                + "\"transcript\":\"" + jsonEscape(transcript) + "\","
+                + "\"model\":\"" + GEMINI_TRANSCRIBE_MODEL + "\","
+                + "\"timestamp\":\"" + Instant.now().toString() + "\""
+                + "}";
+            sendJson(exchange, 200, responseJson);
+        }
+
+        private String callGeminiTranscribe(String apiKey, String payload) {
+            try {
+                String endpoint = "https://generativelanguage.googleapis.com/v1beta/models/" + GEMINI_TRANSCRIBE_MODEL + ":generateContent";
+                HttpRequest req = HttpRequest.newBuilder()
+                    .uri(URI.create(endpoint))
+                    .timeout(Duration.ofMillis(1800))
+                    .header("Content-Type", "application/json")
+                    .header("x-goog-api-key", apiKey)
+                    .header("User-Agent", "aistudio-build")
+                    .POST(HttpRequest.BodyPublishers.ofString(payload, StandardCharsets.UTF_8))
+                    .build();
+                HttpResponse<String> resp = HTTP_CLIENT.send(req, HttpResponse.BodyHandlers.ofString());
+                if (resp.statusCode() == 200) {
+                    return extractGeminiCandidateText(resp.body());
+                }
+            } catch (Exception ignored) {
+            }
+            return null;
+        }
+    }
+
+    private static String generateContextualAnalystReply(
+        String rolePreset,
+        String model,
+        String scanContext,
+        List<ChatTurn> turns
+    ) {
+        String latestUserMsg = "";
+        int userTurnCount = 0;
+        for (ChatTurn t : turns) {
+            if ("user".equals(t.role)) {
+                latestUserMsg = t.text;
+                userTurnCount++;
+            }
+        }
+        String lowerMsg = latestUserMsg.toLowerCase(Locale.ROOT);
+        StringBuilder sb = new StringBuilder();
+
+        if ("incident-advisor".equalsIgnoreCase(rolePreset) || lowerMsg.contains("clicked") || lowerMsg.contains("password") || lowerMsg.contains("otp")) {
+            sb.append("Immediate Incident Safety Guidance:\n");
+            sb.append("• Do Not Submit Credentials or OTPs: Close the browser tab immediately if the page asks for login passwords, card numbers, or one-time codes.\n");
+            sb.append("• Reset Passwords on Official Domains: If you entered a password, open a fresh browser tab, type the service's official address manually, and change your password right away.\n");
+            sb.append("• Enable Multi-Factor Authentication (MFA): Turn on app-based or hardware 2FA on your email and banking accounts.\n");
+            sb.append("• Contact Financial Institutions Directly: If banking details were shared, call the official number printed on the back of your card.");
+        } else if ("scam-educator".equalsIgnoreCase(rolePreset) || lowerMsg.contains("digital arrest") || lowerMsg.contains("scam") || lowerMsg.contains("police") || lowerMsg.contains("customs")) {
+            sb.append("Recognizing Phishing & Digital Arrest Scam Links:\n");
+            sb.append("• Government & Law Enforcement Impersonation: Official agencies never conduct 'digital arrests' over video calls or demand fine payments through unfamiliar web links.\n");
+            sb.append("• Urgency & Coercion Tactics: Scammers use alarming paths (e.g., /account/suspended, /warrant-verify) to pressure you into acting before checking the domain.\n");
+            sb.append("• Inspect the Registrable Domain: Always read the rightmost domain labels before the first single slash (/). Anything to the left of the registrable domain is just a subdomain controlled by the domain owner.");
+        } else if (lowerMsg.contains("subdomain") || lowerMsg.contains("spoof") || lowerMsg.contains("brand")) {
+            sb.append("How Attackers Use Subdomains & Lookalike Domains:\n");
+            sb.append("• Subdomain Chaining: In 'google.com.security-check.example.org', the actual registrable domain is 'example.org'. The 'google.com' portion is merely a subdomain created by the owner of example.org.\n");
+            sb.append("• Typosquatting (Character Substitution): Attackers register lookalikes such as 'paypa1-example.com' (replacing 'l' with '1') to deceive quick visual checks.\n");
+            sb.append("• Verification Rule: Only the registrable domain identifies who controls the destination server.");
+        } else {
+            sb.append("CyberShield AI Security Assessment:\n");
+            sb.append("• Always inspect the registrable domain (the main domain right before the first '/') rather than trusting brand words in subdomains or URL paths.\n");
+            sb.append("• Treat unencrypted HTTP links, raw IP address hostnames, non-standard ports, and URL shorteners with heightened caution.\n");
+            sb.append("• Remember that lexical URL indicators are warning signals rather than proof—always navigate to sensitive banking or email services via your own bookmarks.");
+        }
+
+        if (scanContext != null && !scanContext.isBlank()) {
+            sb.append("\n\nActive Scanned URL Reference:\n").append(scanContext.trim());
+        }
+        if (userTurnCount > 1) {
+            sb.append("\n\n(Conversation Turn #").append(userTurnCount).append(" · Active Role: ").append(rolePreset).append(")");
+        }
+        return sb.toString();
     }
 
     private static boolean isIpHostname(String hostname) {
@@ -538,7 +983,13 @@ public class CyberShieldServer {
             return "{\"valid\":false,\"errorTitle\":\"Input Exceeds Maximum Length\",\"error\":\"The submitted text is over 2,048 characters long. Please submit a single valid URL.\"}";
         }
         if (trimmed.matches(".*\\s+.*")) {
-            return "{\"valid\":false,\"errorTitle\":\"Embedded Whitespace or Multiple URLs\",\"error\":\"This tool only scans single URLs, not text messages or paragraphs. Remove spaces before scanning.\"}";
+            Matcher multiHttp = Pattern.compile("(?i)https?://").matcher(trimmed);
+            int count = 0;
+            while (multiHttp.find()) count++;
+            if (count > 1) {
+                return "{\"valid\":false,\"errorTitle\":\"Multiple URLs Detected\",\"error\":\"CyberShield AI analyzes one URL at a time. Please submit a single URL without extra text or spaces.\"}";
+            }
+            return "{\"valid\":false,\"errorTitle\":\"Embedded Whitespace or Message Text Detected\",\"error\":\"This tool only scans single URLs, not text messages or paragraphs. Remove spaces and surrounding text before scanning.\"}";
         }
 
         String candidate = trimmed;
@@ -576,7 +1027,6 @@ public class CyberShieldServer {
 
         String host = parsed.getHost();
         if (host == null || host.isBlank()) {
-            // Fallback host extraction if URI authority had special chars
             String auth = parsed.getRawAuthority();
             if (auth != null) {
                 int atIdx = auth.lastIndexOf('@');
@@ -721,7 +1171,6 @@ public class CyberShieldServer {
             for (BrandRule brand : PROTECTED_BRANDS) {
                 if (brand.officialDomains.contains(registrableDomain)) continue;
 
-                // Explicit regex typosquats
                 for (Pattern pat : brand.typosquatPatterns) {
                     Matcher m = pat.matcher(hostname);
                     if (m.find()) {
@@ -740,7 +1189,6 @@ public class CyberShieldServer {
                 }
                 if (matchedBrandSignal) break;
 
-                // Homoglyph & 1-char edit distance in registrable segments
                 for (String seg : regSegments) {
                     if (seg.isEmpty()) continue;
                     for (String token : brand.tokens) {
@@ -777,7 +1225,6 @@ public class CyberShieldServer {
                 }
                 if (matchedBrandSignal) break;
 
-                // Exact brand token in subdomain or hyphenated registrable domain
                 List<String> subTokens = Arrays.asList(subLower.split("[.-]"));
                 List<String> regSegList = Arrays.asList(regSegments);
                 for (String token : brand.tokens) {

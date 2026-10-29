@@ -1,6 +1,6 @@
 {
   "name": "CyberShield AI",
   "description": "URL Threat Detection & Cybersecurity Awareness Platform for analyzing suspicious links, phishing patterns, deceptive domains, and brand impersonation.",
-  "requestFramePermissions": [],
+  "requestFramePermissions": ["microphone"],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

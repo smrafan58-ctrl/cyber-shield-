@@ -4,11 +4,11 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "tsx server.ts",
-    "start": "NODE_ENV=production tsx server.ts",
+    "dev": "bash backend/run-java-server.sh",
+    "start": "bash backend/run-java-server.sh",
     "build": "vite build",
     "preview": "vite preview",
-    "clean": "rm -rf dist server.js",
+    "clean": "rm -rf dist backend/*.class",
     "lint": "tsc --noEmit"
   },
   "dependencies": {

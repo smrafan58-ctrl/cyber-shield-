@@ -7,9 +7,9 @@ import {
   Copy,
   Check,
   Download,
-  BookOpen,
   RotateCcw,
   Globe,
+  ArrowLeft,
 } from 'lucide-react';
 import {
   IndicatorSeverity,
@@ -24,7 +24,6 @@ import {
 interface ScanResultsDashboardProps {
   result: URLAnalysisResult;
   onScanAnother: () => void;
-  onOpenSafetyGuide: () => void;
 }
 
 function getRiskVisualTheme(classification: RiskClassification) {
@@ -95,7 +94,6 @@ function getSeverityTextColor(severity: IndicatorSeverity): string {
 export const ScanResultsDashboard: React.FC<ScanResultsDashboardProps> = ({
   result,
   onScanAnother,
-  onOpenSafetyGuide,
 }) => {
   const [copiedSummary, setCopiedSummary] = useState(false);
 
@@ -144,7 +142,22 @@ export const ScanResultsDashboard: React.FC<ScanResultsDashboardProps> = ({
   };
 
   return (
-    <div className="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8 space-y-8">
+    <div className="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8 space-y-6">
+      {/* Top Bar Navigation Back to Scanner */}
+      <div className="flex items-center justify-between gap-4 pb-2">
+        <button
+          type="button"
+          onClick={onScanAnother}
+          className="inline-flex items-center gap-2 text-xs sm:text-sm font-medium text-sky-400 hover:text-sky-300 transition-colors cursor-pointer"
+        >
+          <ArrowLeft className="h-4 w-4" />
+          <span>Back to URL Scanner</span>
+        </button>
+        <span className="text-xs font-mono text-slate-400">
+          Target: {result.domain.hostname}
+        </span>
+      </div>
+
       {/* Top Row: A. Risk Score Card + D. Recommended Action Card */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch">
         {/* A. Risk Score Card (7 cols) */}
@@ -291,11 +304,20 @@ export const ScanResultsDashboard: React.FC<ScanResultsDashboardProps> = ({
           </div>
 
           {/* E. Result Actions */}
-          <div className="mt-6 pt-4 border-t border-slate-800 grid grid-cols-2 gap-2.5">
+          <div className="mt-6 pt-4 border-t border-slate-800 flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={onScanAnother}
+              className="inline-flex items-center justify-center gap-2 rounded-lg bg-sky-400 px-4 py-2.5 text-xs font-semibold text-slate-950 hover:bg-sky-300 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              <RotateCcw className="h-3.5 w-3.5 shrink-0" />
+              <span>Scan Another URL</span>
+            </button>
+
             <button
               type="button"
               onClick={handleCopySummary}
-              className="inline-flex items-center justify-center gap-2 rounded-lg border border-slate-700 bg-slate-800/80 px-3 py-2.5 text-xs font-medium text-slate-100 hover:bg-slate-700 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              className="inline-flex items-center justify-center gap-2 rounded-lg border border-slate-700 bg-slate-800/80 px-3.5 py-2.5 text-xs font-medium text-slate-100 hover:bg-slate-700 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
               {copiedSummary ? (
                 <>
@@ -313,28 +335,10 @@ export const ScanResultsDashboard: React.FC<ScanResultsDashboardProps> = ({
             <button
               type="button"
               onClick={handleDownloadTxt}
-              className="inline-flex items-center justify-center gap-2 rounded-lg border border-slate-700 bg-slate-800/80 px-3 py-2.5 text-xs font-medium text-slate-100 hover:bg-slate-700 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              className="inline-flex items-center justify-center gap-2 rounded-lg border border-slate-700 bg-slate-800/80 px-3.5 py-2.5 text-xs font-medium text-slate-100 hover:bg-slate-700 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
               <Download className="h-3.5 w-3.5 text-sky-400 shrink-0" />
-              <span>Download Report (.TXT)</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={onScanAnother}
-              className="inline-flex items-center justify-center gap-2 rounded-lg border border-slate-700 bg-slate-800/40 px-3 py-2.5 text-xs font-medium text-slate-200 hover:bg-slate-800 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-            >
-              <RotateCcw className="h-3.5 w-3.5 text-slate-400 shrink-0" />
-              <span>Scan Another URL</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={onOpenSafetyGuide}
-              className="inline-flex items-center justify-center gap-2 rounded-lg border border-sky-500/40 bg-sky-500/10 px-3 py-2.5 text-xs font-medium text-sky-300 hover:bg-sky-500/20 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-            >
-              <BookOpen className="h-3.5 w-3.5 text-sky-400 shrink-0" />
-              <span>View Safety Guide</span>
+              <span>Download Report as TXT</span>
             </button>
           </div>
         </section>

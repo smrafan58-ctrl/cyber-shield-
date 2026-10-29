@@ -6,9 +6,30 @@ import {
   AlertTriangle,
   Lock,
   ShieldCheck,
+  History,
+  Trash2,
+  ArrowUpRight,
 } from 'lucide-react';
-import { EXAMPLE_TEST_FIXTURES } from '../engine/urlAnalyzer';
-import { ExampleFixture } from '../types/scanner';
+import { EXAMPLE_TEST_FIXTURES } from '../engine/constants';
+import {
+  ExampleFixture,
+  RiskClassification,
+  URLAnalysisResult,
+} from '../types/scanner';
+import { AudioTranscribeButton } from './AudioTranscribeButton';
+
+function normalizeSpokenUrlTranscript(transcript: string): string {
+  const cleaned = transcript
+    .trim()
+    .replace(/^["'`]+|["'`.,!?]+$/g, '')
+    .replace(/\bhttps?\s+colon\s+slash\s+slash\b/gi, 'https://')
+    .replace(/\bcolon\s+slash\s+slash\b/gi, '://')
+    .replace(/\s+dot\s+/gi, '.')
+    .replace(/\s+slash\s+/gi, '/')
+    .replace(/\s+dash\s+|\s+hyphen\s+/gi, '-')
+    .replace(/\s+/g, '');
+  return cleaned;
+}
 
 interface URLInputSectionProps {
   urlInput: string;
@@ -18,6 +39,39 @@ interface URLInputSectionProps {
   validationError: { title: string; message: string } | null;
   isScanning: boolean;
   inputRef: React.RefObject<HTMLInputElement | null>;
+  scanHistory: URLAnalysisResult[];
+  onSelectHistoryItem: (item: URLAnalysisResult) => void;
+  onClearHistory: () => void;
+}
+
+function getHistoryRiskAccent(classification: RiskClassification) {
+  switch (classification) {
+    case 'LOW RISK INDICATORS':
+      return {
+        scoreText: 'text-emerald-400',
+        barBg: 'bg-emerald-500',
+      };
+    case 'MILD SUSPICION':
+      return {
+        scoreText: 'text-amber-300',
+        barBg: 'bg-amber-400',
+      };
+    case 'MODERATE RISK':
+      return {
+        scoreText: 'text-amber-400',
+        barBg: 'bg-amber-500',
+      };
+    case 'HIGH RISK':
+      return {
+        scoreText: 'text-rose-400',
+        barBg: 'bg-rose-500',
+      };
+    case 'VERY HIGH RISK':
+      return {
+        scoreText: 'text-rose-500',
+        barBg: 'bg-rose-600',
+      };
+  }
 }
 
 export const URLInputSection: React.FC<URLInputSectionProps> = ({
@@ -28,6 +82,9 @@ export const URLInputSection: React.FC<URLInputSectionProps> = ({
   validationError,
   isScanning,
   inputRef,
+  scanHistory,
+  onSelectHistoryItem,
+  onClearHistory,
 }) => {
   const [clipboardFeedback, setClipboardFeedback] = useState<string | null>(null);
 
@@ -70,10 +127,10 @@ export const URLInputSection: React.FC<URLInputSectionProps> = ({
   };
 
   return (
-    <section className="border-b border-slate-800/80 bg-gradient-to-b from-[#0F172A] to-[#0B1120] py-10 sm:py-14">
-      <div className="mx-auto max-w-5xl px-4 sm:px-6 lg:px-8">
+    <section className="py-6 sm:py-8">
+      <div className="mx-auto max-w-4xl px-4 sm:px-6 lg:px-8 space-y-5">
         {/* Brand Identity & Hero Header */}
-        <div className="text-center max-w-3xl mx-auto mb-8">
+        <div className="text-center max-w-3xl mx-auto">
           <p className="text-xs font-semibold tracking-wide text-sky-400 mb-2">
             Scan Smart. Stay Safe. Stop Cyber Threats.
           </p>
@@ -124,7 +181,7 @@ export const URLInputSection: React.FC<URLInputSectionProps> = ({
                 />
               </div>
 
-              <div className="flex items-center gap-2.5 shrink-0">
+              <div className="flex flex-wrap items-center gap-2.5 shrink-0">
                 <button
                   type="submit"
                   disabled={isScanning}
@@ -143,6 +200,18 @@ export const URLInputSection: React.FC<URLInputSectionProps> = ({
                   <ClipboardPaste className="h-4 w-4 shrink-0" aria-hidden="true" />
                   <span>Paste</span>
                 </button>
+
+                <AudioTranscribeButton
+                  mode="url"
+                  disabled={isScanning}
+                  onStatusMessage={(msg) => setClipboardFeedback(msg)}
+                  onTranscribed={(transcript) => {
+                    const normalizedUrl = normalizeSpokenUrlTranscript(transcript);
+                    setClipboardFeedback(null);
+                    onUrlInputChange(normalizedUrl);
+                    inputRef.current?.focus();
+                  }}
+                />
 
                 <button
                   type="button"
@@ -230,6 +299,118 @@ export const URLInputSection: React.FC<URLInputSectionProps> = ({
             </div>
           </div>
         </div>
+
+        {/* Local Storage Scan History Section (Last 5 Analyzed URLs) */}
+        <section
+          aria-labelledby="recent-scan-history-heading"
+          className="rounded-xl border border-slate-800 bg-[#111827] p-5 sm:p-6"
+        >
+          <div className="flex items-center justify-between gap-4 border-b border-slate-800 pb-3.5">
+            <div className="flex items-center gap-2.5">
+              <History className="h-4 w-4 text-sky-400 shrink-0" aria-hidden="true" />
+              <div>
+                <h2
+                  id="recent-scan-history-heading"
+                  className="text-sm font-semibold text-slate-100"
+                >
+                  Recent Scan History
+                </h2>
+                <p className="text-xs text-slate-400">
+                  Last 5 analyzed URLs and risk scores saved in local storage for quick reference
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-3">
+              <span className="text-xs font-mono text-slate-400 tabular-nums">
+                {scanHistory.length} / 5 saved
+              </span>
+              {scanHistory.length > 0 && (
+                <button
+                  type="button"
+                  onClick={onClearHistory}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800/60 px-2.5 py-1.5 text-xs font-medium text-slate-300 hover:bg-slate-800 hover:text-rose-300 transition-colors cursor-pointer"
+                >
+                  <Trash2 className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                  <span>Clear History</span>
+                </button>
+              )}
+            </div>
+          </div>
+
+          {scanHistory.length === 0 ? (
+            <div className="py-6 text-center text-xs text-slate-400">
+              No URLs scanned yet in this browser. Scan a link above to automatically keep track of your last 5 analyzed URLs and risk scores.
+            </div>
+          ) : (
+            <ul className="divide-y divide-slate-800/80">
+              {scanHistory.map((item) => {
+                const accent = getHistoryRiskAccent(item.classification);
+                return (
+                  <li key={item.domain.normalizedUrl || item.id}>
+                    <button
+                      type="button"
+                      onClick={() => onSelectHistoryItem(item)}
+                      className="w-full py-3.5 px-2 -mx-2 rounded-lg flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-left hover:bg-slate-800/40 transition-colors group cursor-pointer"
+                    >
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-2">
+                          <span className="font-mono text-sm font-semibold text-slate-100 group-hover:text-sky-300 transition-colors truncate">
+                            {item.domain.hostname}
+                          </span>
+                          <span aria-hidden="true" className="text-slate-600">
+                            ·
+                          </span>
+                          <span className="text-xs text-slate-400 font-mono tabular-nums shrink-0">
+                            {item.indicators.length}{' '}
+                            {item.indicators.length === 1 ? 'finding' : 'findings'}
+                          </span>
+                        </div>
+                        <p className="mt-0.5 text-xs font-mono text-slate-400 truncate">
+                          {item.domain.redactedUrl}
+                        </p>
+                      </div>
+
+                      <div className="flex items-center justify-between sm:justify-end gap-4 shrink-0">
+                        <div className="text-left sm:text-right">
+                          <div className="flex items-baseline sm:justify-end gap-1.5 font-mono tabular-nums">
+                            <span
+                              className={`text-sm font-bold ${accent.scoreText}`}
+                            >
+                              {item.riskScore}
+                            </span>
+                            <span className="text-xs text-slate-500">/ 100</span>
+                            <span aria-hidden="true" className="text-slate-600">
+                              ·
+                            </span>
+                            <span
+                              className={`text-xs font-semibold ${accent.scoreText}`}
+                            >
+                              {item.classification}
+                            </span>
+                          </div>
+                          <div className="mt-1 h-1 w-28 sm:ml-auto rounded-full bg-slate-800 overflow-hidden">
+                            <div
+                              className={`h-full ${accent.barBg}`}
+                              style={{
+                                width: `${Math.max(4, item.riskScore)}%`,
+                              }}
+                            />
+                          </div>
+                        </div>
+
+                        <span className="inline-flex items-center gap-1 text-xs font-medium text-sky-400 group-hover:text-sky-300 shrink-0">
+                          <span>View Report</span>
+                          <ArrowUpRight className="h-3.5 w-3.5" aria-hidden="true" />
+                        </span>
+                      </div>
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </section>
       </div>
     </section>
   );

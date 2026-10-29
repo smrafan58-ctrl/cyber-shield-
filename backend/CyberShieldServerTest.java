@@ -1,3 +1,5 @@
+import java.util.List;
+
 public class CyberShieldServerTest {
     public static void main(String[] args) {
         // 1. Reject empty input
@@ -32,7 +34,34 @@ public class CyberShieldServerTest {
         assertTrue(!redactJson.contains("secret999") || redactJson.contains("\"redactedUrl\":\"https://example.com/Callback?token=[REDACTED]\""),
             "Redacted URL must mask query values");
 
-        System.out.println("PASS: All 6 Java Backend URL Analysis Engine assertions passed!");
+        // 7. Multi-turn Gemini chat parsing, model selection, and system instruction formatting
+        assertTrue("gemini-3.8-flash".equals(CyberShieldServer.normalizeGeminiModel(null)), "Default model must be gemini-3.8-flash");
+        assertTrue("gemini-3.1-flash-lite".equals(CyberShieldServer.normalizeGeminiModel("gemini-3.1-flash-lite")), "Must support gemini-3.1-flash-lite");
+        assertTrue("gemini-4-argon".equals(CyberShieldServer.normalizeGeminiModel("gemini-4-argon")), "Must support gemini-4-argon");
+
+        String chatRequestBody = "{\"model\":\"gemini-3.8-flash\",\"rolePreset\":\"threat-analyst\",\"messages\":[{\"role\":\"user\",\"text\":\"Why is paypa1-example.com risky?\"},{\"role\":\"model\",\"text\":\"It uses character substitution.\"},{\"role\":\"user\",\"text\":\"What should I do next?\"}]}";
+        List<CyberShieldServer.ChatTurn> turns = CyberShieldServer.parseChatMessagesFromJson(chatRequestBody);
+        assertTrue(turns.size() == 3, "Must parse all 3 multi-turn chat messages");
+        assertTrue("user".equals(turns.get(0).role) && "model".equals(turns.get(1).role), "Must preserve user and model turn roles");
+
+        String sysInst = CyberShieldServer.buildRoleSystemInstruction("scam-educator", "Hostname: paypa1-example.com, Score: 40/100");
+        String geminiPayload = CyberShieldServer.buildGeminiRequestPayload(sysInst, turns);
+        assertTrue(geminiPayload.contains("\"systemInstruction\""), "Payload must include systemInstruction");
+        assertTrue(geminiPayload.contains("Scam & Phishing Educator"), "System instruction must reflect selected role");
+        assertTrue(geminiPayload.contains("\"contents\""), "Payload must include multi-turn contents array");
+
+        String mockGeminiResp = "{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Never enter credentials on lookalike domains.\"}],\"role\":\"model\"}}]}";
+        String extracted = CyberShieldServer.extractGeminiCandidateText(mockGeminiResp);
+        assertTrue("Never enter credentials on lookalike domains.".equals(extracted), "Must extract candidate text cleanly");
+
+        // 8. Audio transcription payload builder for gemini-3.5-transcribe
+        assertTrue("gemini-3.5-transcribe".equals(CyberShieldServer.GEMINI_TRANSCRIBE_MODEL), "Audio transcription model must be gemini-3.5-transcribe");
+        String transcribePayload = CyberShieldServer.buildGeminiTranscribePayload("UklGRiQAAABXQVZFZm10IBAAAAABAAEA", "audio/webm", "Transcribe this audio.");
+        assertTrue(transcribePayload.contains("\"inlineData\""), "Transcribe payload must contain inlineData part");
+        assertTrue(transcribePayload.contains("\"mimeType\":\"audio/webm\""), "Transcribe payload must include audio mimeType");
+        assertTrue(transcribePayload.contains("Transcribe this audio."), "Transcribe payload must include transcription instruction");
+
+        System.out.println("PASS: All 8 Java Backend URL Analysis, Gemini Multi-Turn Chat & Audio Transcription assertions passed!");
     }
 
     private static void assertTrue(boolean condition, String message) {
