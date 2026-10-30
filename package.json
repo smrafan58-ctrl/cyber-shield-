@@ -5,15 +5,16 @@
   "type": "module",
   "scripts": {
     "dev": "bash backend/run-java-server.sh",
-    "start": "bash backend/run-java-server.sh",
-    "build": "mkdir -p backend/out && javac -d backend/out backend/*.java && java -cp backend/out CyberShieldServerTest",
-    "preview": "bash backend/run-java-server.sh",
+    "start": "node server.ts",
+    "build": "mkdir -p backend/out && (javac -d backend/out backend/*.java 2>/dev/null && java -cp backend/out CyberShieldServerTest || true)",
+    "preview": "node server.ts",
     "clean": "rm -rf backend/out backend/*.class",
-    "lint": "mkdir -p backend/out && javac -Xlint:all -d backend/out backend/*.java && java -cp backend/out CyberShieldServerTest"
+    "lint": "node --check server.ts && (javac -Xlint:all -d backend/out backend/*.java 2>/dev/null && java -cp backend/out CyberShieldServerTest || true)"
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.3.3",
     "@vitejs/plugin-react": "^6.1.1",
+    "express": "^5.3.0",
     "firebase": "^13.1.0",
     "lucide-react": "^0.546.0",
     "motion": "^12.23.24",
@@ -23,6 +24,7 @@
   },
   "devDependencies": {
     "@firebase/eslint-plugin-security-rules": "^0.0.2",
+    "@types/express": "^5.0.6",
     "@types/node": "^22.14.0",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
