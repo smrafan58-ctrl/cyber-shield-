@@ -6,10 +6,10 @@
   "scripts": {
     "dev": "bash backend/run-java-server.sh",
     "start": "bash backend/run-java-server.sh",
-    "build": "vite build",
-    "preview": "vite preview",
-    "clean": "rm -rf dist backend/*.class",
-    "lint": "tsc --noEmit"
+    "build": "mkdir -p backend/out && javac -d backend/out backend/*.java && java -cp backend/out CyberShieldServerTest",
+    "preview": "bash backend/run-java-server.sh",
+    "clean": "rm -rf backend/out backend/*.class",
+    "lint": "mkdir -p backend/out && javac -Xlint:all -d backend/out backend/*.java && java -cp backend/out CyberShieldServerTest"
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.3.3",

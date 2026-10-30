@@ -1,3 +1,4 @@
+import com.sun.net.httpserver.Headers;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
@@ -13,11 +14,10 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.LocalTime;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
@@ -28,24 +28,27 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Executors;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * CyberShield AI — Pure Java 17 Backend & Web Server
- * Listens directly on port 3000, serves the compiled frontend assets from ./dist,
- * and executes all URL validation, domain extraction, brand impersonation detection,
- * heuristic risk scoring, rate limiting, and reputation checks in Java.
+ * CyberShield AI — Pure Java 17 Web Application & URL Threat Detection Engine.
+ * Enforces strict input validation, secret/query redaction, rate limiting,
+ * HTTP security headers, and zero internal telemetry exposure.
  */
 public class CyberShieldServer {
 
     private static final int DEFAULT_PORT = 3000;
-    private static final int MAX_BODY_BYTES = 4096;
+    private static final int MAX_BODY_BYTES = 8192;
     private static final long RATE_LIMIT_WINDOW_MS = 60_000L;
-    private static final int MAX_REQUESTS_PER_WINDOW = 60;
+    private static final int MAX_REQUESTS_PER_WINDOW = 120;
+    private static final int MAX_RATE_BUCKETS = 4096;
+    private static final int MAX_WEB_CHAT_MESSAGES = 20;
+    private static final int MAX_CHAT_MESSAGE_LENGTH = 500;
 
-    private static final String MANDATORY_DISCLAIMER =
+    public static final String MANDATORY_DISCLAIMER =
         "Risk scores are based on observable URL patterns and available reputation data. They do not guarantee that a website is safe or malicious.";
 
     private static final List<String> UNIVERSAL_SAFETY_RULES = List.of(
@@ -78,12 +81,42 @@ public class CyberShieldServer {
         "next", "url", "target", "dest", "destination", "continue", "goto", "out", "view"
     ));
 
+    private static final Pattern SECRET_TOKEN_PATTERN = Pattern.compile(
+        "(?i)(AIza[0-9A-Za-z_-]{15,}|sk-[0-9A-Za-z_-]{15,}|ghp_[0-9A-Za-z]{15,}|Bearer\\s+[0-9A-Za-z._-]{10,})"
+    );
+
     private static final Map<String, RateBucket> RATE_LIMITS = new ConcurrentHashMap<>();
     private static final HttpClient HTTP_CLIENT = HttpClient.newBuilder()
         .connectTimeout(Duration.ofMillis(3000))
         .build();
     public static final ScanHistoryJavaStore HISTORY_STORE = new ScanHistoryJavaStore();
     private static final GeminiJavaService GEMINI_SERVICE = new GeminiJavaService(HTTP_CLIENT);
+
+    // Server-side multi-turn chat state for the Web UI
+    private static final List<CyberShieldWebUi.ChatMessageView> WEB_CHAT_MESSAGES = new CopyOnWriteArrayList<>();
+    private static volatile String activeChatRole = "threat-analyst";
+    private static volatile String activeChatModel = "gemini-3-flash-preview";
+
+    static {
+        resetWebChatMessages("threat-analyst");
+    }
+
+    private static void resetWebChatMessages(String rolePreset) {
+        WEB_CHAT_MESSAGES.clear();
+        String welcome;
+        if ("scam-educator".equalsIgnoreCase(rolePreset)) {
+            welcome = "Hello! I am the CyberShield AI Scam & Phishing Educator. Ask me how to spot phishing links, fake payment portals, or government impersonation scams.";
+        } else if ("incident-advisor".equalsIgnoreCase(rolePreset)) {
+            welcome = "Hello! I am the CyberShield AI Incident Safety Advisor. Tell me if you clicked a suspicious link or entered credentials, and I will walk you through immediate safety steps.";
+        } else {
+            welcome = "Hello! I am the CyberShield AI URL Threat Analyst. Ask me about any scanned URL, suspicious subdomain, lookalike domain, or security indicator.";
+        }
+        WEB_CHAT_MESSAGES.add(new CyberShieldWebUi.ChatMessageView("model", welcome, currentShortTime(), null));
+    }
+
+    private static String currentShortTime() {
+        return LocalTime.now().format(DateTimeFormatter.ofPattern("HH:mm"));
+    }
 
     private static class RateBucket {
         int count;
@@ -165,15 +198,13 @@ public class CyberShieldServer {
             } catch (NumberFormatException ignored) {}
         }
 
-        Path distDir = Paths.get("dist").toAbsolutePath().normalize();
-        if (!Files.exists(distDir)) {
-            Path parentDist = Paths.get("..", "dist").toAbsolutePath().normalize();
-            if (Files.exists(parentDist)) {
-                distDir = parentDist;
-            }
-        }
-
         HttpServer server = HttpServer.create(new InetSocketAddress("0.0.0.0", port), 0);
+        // Web UI Routes
+        server.createContext("/scan", new WebScanHandler());
+        server.createContext("/clear-history", new WebClearHistoryHandler());
+        server.createContext("/export", new WebExportHandler());
+        server.createContext("/chat", new WebChatHandler());
+        // JSON API Routes
         server.createContext("/api/health", new HealthHandler());
         server.createContext("/api/reputation/status", new ReputationStatusHandler());
         server.createContext("/api/reputation/check", new ReputationCheckHandler());
@@ -181,76 +212,440 @@ public class CyberShieldServer {
         server.createContext("/api/history", new ScanHistoryHandler());
         server.createContext("/api/chat", new ChatHandler());
         server.createContext("/api/transcribe", new TranscribeAudioHandler());
-        server.createContext("/", new StaticFileHandler(distDir));
+        server.createContext("/", new WebRootHandler());
         server.setExecutor(Executors.newFixedThreadPool(12));
         server.start();
-        System.out.println("CyberShield AI Pure Java 17 Server listening on http://0.0.0.0:" + port);
+        System.out.println("CyberShield AI Server listening on http://0.0.0.0:" + port);
     }
 
     /**
-     * Serves compiled static frontend assets from ./dist and falls back to index.html for SPA routes.
+     * Redacts any embedded authority credentials, query parameter values, or raw API key tokens
+     * from a user-supplied string so secrets are never stored or echoed back.
      */
-    static class StaticFileHandler implements HttpHandler {
-        private final Path distDir;
-
-        StaticFileHandler(Path distDir) {
-            this.distDir = distDir;
+    public static String redactSensitiveInput(String input) {
+        if (input == null || input.isBlank()) return "";
+        String sanitized = SECRET_TOKEN_PATTERN.matcher(input.trim()).replaceAll("[REDACTED]");
+        // Redact authority credentials before @ (e.g. https://user:pass@host -> https://[REDACTED]@host)
+        sanitized = sanitized.replaceAll("(?i)(https?://)([^/?#@\\s]+)@", "$1[REDACTED]@");
+        // Redact any query string parameter values (?k=v&k2=v2 -> ?k=[REDACTED]&k2=[REDACTED])
+        int qIdx = sanitized.indexOf('?');
+        if (qIdx >= 0 && qIdx + 1 < sanitized.length()) {
+            String base = sanitized.substring(0, qIdx);
+            String queryAndHash = sanitized.substring(qIdx + 1);
+            int hashIdx = queryAndHash.indexOf('#');
+            String queryPart = hashIdx >= 0 ? queryAndHash.substring(0, hashIdx) : queryAndHash;
+            StringBuilder qSb = new StringBuilder();
+            for (String pair : queryPart.split("&")) {
+                if (pair.isEmpty()) continue;
+                if (qSb.length() > 0) qSb.append("&");
+                int eq = pair.indexOf('=');
+                String key = eq >= 0 ? pair.substring(0, eq) : pair;
+                String safeKey = key.replaceAll("[^a-zA-Z0-9_.-]", "");
+                if (safeKey.isEmpty()) safeKey = "param";
+                qSb.append(safeKey).append("=[REDACTED]");
+            }
+            sanitized = base + (qSb.length() > 0 ? "?" + qSb : "");
         }
+        return sanitized;
+    }
 
+    private static void applySecurityHeaders(HttpExchange exchange) {
+        Headers headers = exchange.getResponseHeaders();
+        // Allow iframe embedding within AI Studio workspace and Cloud Run preview domains
+        headers.set("Content-Security-Policy",
+            "default-src 'self' https: data: 'unsafe-inline' 'unsafe-eval'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https:; connect-src 'self' https:; frame-ancestors *; base-uri 'self'; form-action 'self'");
+        headers.set("X-Content-Type-Options", "nosniff");
+        headers.set("Referrer-Policy", "no-referrer");
+        headers.set("Permissions-Policy", "geolocation=(), camera=(), microphone=(self), payment=(), usb=()");
+        headers.set("Cache-Control", "no-store, no-cache, must-revalidate");
+    }
+
+    private static String extractClientIp(HttpExchange exchange) {
+        if (exchange.getRemoteAddress() != null && exchange.getRemoteAddress().getAddress() != null) {
+            return exchange.getRemoteAddress().getAddress().getHostAddress();
+        }
+        return "local";
+    }
+
+    private static Map<String, String> parseUrlEncodedPairs(String raw) {
+        Map<String, String> map = new LinkedHashMap<>();
+        if (raw == null || raw.isBlank()) return map;
+        for (String pair : raw.split("&")) {
+            if (pair.isEmpty()) continue;
+            int eq = pair.indexOf('=');
+            String k = eq >= 0 ? pair.substring(0, eq) : pair;
+            String v = eq >= 0 ? pair.substring(eq + 1) : "";
+            try {
+                String dk = URLDecoder.decode(k, StandardCharsets.UTF_8);
+                String dv = URLDecoder.decode(v, StandardCharsets.UTF_8);
+                map.put(dk, dv);
+            } catch (Exception ignored) {
+                map.put(k, v);
+            }
+        }
+        return map;
+    }
+
+    private static void sendHtml(HttpExchange exchange, int statusCode, String htmlBody) throws IOException {
+        byte[] bytes = htmlBody.getBytes(StandardCharsets.UTF_8);
+        applySecurityHeaders(exchange);
+        exchange.getResponseHeaders().set("Content-Type", "text/html; charset=utf-8");
+        exchange.sendResponseHeaders(statusCode, bytes.length);
+        try (OutputStream os = exchange.getResponseBody()) {
+            os.write(bytes);
+        }
+    }
+
+    private static void sendRedirect(HttpExchange exchange, String location) throws IOException {
+        applySecurityHeaders(exchange);
+        // Strictly enforce internal-only relative redirect path to prevent open redirects and header injection
+        String safeLoc = (location == null || !location.startsWith("/") || location.startsWith("//"))
+            ? "/"
+            : location.replaceAll("[\\r\\n]", "");
+        exchange.getResponseHeaders().set("Location", safeLoc);
+        exchange.sendResponseHeaders(303, -1);
+        exchange.close();
+    }
+
+    /**
+     * Renders the main URL Pasting Page (or Scan Results Page if ?url=... is passed).
+     * Rejects non-root paths with 404 Not Found so sensitive files cannot be probed.
+     */
+    static class WebRootHandler implements HttpHandler {
         @Override
         public void handle(HttpExchange exchange) throws IOException {
-            String rawPath = exchange.getRequestURI().getPath();
-            if (rawPath == null || rawPath.isEmpty() || "/".equals(rawPath)) {
-                rawPath = "/index.html";
+            if (!allowRateLimit(extractClientIp(exchange))) {
+                sendHtml(exchange, 429, "<!DOCTYPE html><html><body><h1>429 Too Many Requests</h1></body></html>");
+                return;
+            }
+            String reqPath = exchange.getRequestURI().getPath();
+            if (reqPath != null && !reqPath.equals("/") && !reqPath.equals("/index.html")) {
+                sendHtml(exchange, 404, "<!DOCTYPE html><html><body><h1>404 Not Found</h1></body></html>");
+                return;
+            }
+            if (!"GET".equalsIgnoreCase(exchange.getRequestMethod()) && !"HEAD".equalsIgnoreCase(exchange.getRequestMethod())) {
+                sendHtml(exchange, 405, "<!DOCTYPE html><html><body><h1>405 Method Not Allowed</h1></body></html>");
+                return;
             }
 
-            String cleanRelative = rawPath.startsWith("/") ? rawPath.substring(1) : rawPath;
-            Path target = distDir.resolve(cleanRelative).normalize();
+            Map<String, String> query = parseUrlEncodedPairs(exchange.getRequestURI().getRawQuery());
+            boolean chatOpen = "open".equalsIgnoreCase(query.get("chat")) || "1".equals(query.get("chat"));
+            String urlParam = query.get("url");
 
-            // Prevent path traversal outside distDir
-            if (!target.startsWith(distDir) || !Files.exists(target) || Files.isDirectory(target)) {
-                target = distDir.resolve("index.html").normalize();
+            if (urlParam != null && !urlParam.isBlank()) {
+                ScanResultModel.AnalysisOutcome outcome = analyzeUrlStructured(urlParam);
+                if (outcome.valid && outcome.result != null) {
+                    String html = CyberShieldWebUi.renderResultsPage(
+                        outcome.result,
+                        chatOpen,
+                        activeChatRole,
+                        activeChatModel,
+                        new ArrayList<>(WEB_CHAT_MESSAGES),
+                        null
+                    );
+                    sendHtml(exchange, 200, html);
+                    return;
+                } else {
+                    String html = CyberShieldWebUi.renderScannerPage(
+                        redactSensitiveInput(urlParam),
+                        outcome.errorTitle,
+                        outcome.errorMessage,
+                        HISTORY_STORE.getRecentScans(),
+                        chatOpen,
+                        activeChatRole,
+                        activeChatModel,
+                        new ArrayList<>(WEB_CHAT_MESSAGES),
+                        null,
+                        MANDATORY_DISCLAIMER
+                    );
+                    sendHtml(exchange, 200, html);
+                    return;
+                }
             }
 
-            if (!Files.exists(target)) {
-                byte[] msg = "Frontend bundle not found. Run vite build first.".getBytes(StandardCharsets.UTF_8);
-                exchange.getResponseHeaders().set("Content-Type", "text/plain; charset=utf-8");
-                exchange.sendResponseHeaders(404, msg.length);
+            String html = CyberShieldWebUi.renderScannerPage(
+                "",
+                null,
+                null,
+                HISTORY_STORE.getRecentScans(),
+                chatOpen,
+                activeChatRole,
+                activeChatModel,
+                new ArrayList<>(WEB_CHAT_MESSAGES),
+                null,
+                MANDATORY_DISCLAIMER
+            );
+            sendHtml(exchange, 200, html);
+        }
+    }
+
+    /**
+     * Handles POST /scan and GET /scan?url=...
+     */
+    static class WebScanHandler implements HttpHandler {
+        @Override
+        public void handle(HttpExchange exchange) throws IOException {
+            if (!allowRateLimit(extractClientIp(exchange))) {
+                sendHtml(exchange, 429, "<!DOCTYPE html><html><body><h1>429 Too Many Requests</h1></body></html>");
+                return;
+            }
+            String method = exchange.getRequestMethod();
+            if (!"GET".equalsIgnoreCase(method) && !"POST".equalsIgnoreCase(method)) {
+                sendHtml(exchange, 405, "<!DOCTYPE html><html><body><h1>405 Method Not Allowed</h1></body></html>");
+                return;
+            }
+
+            Map<String, String> params = new LinkedHashMap<>(parseUrlEncodedPairs(exchange.getRequestURI().getRawQuery()));
+            if ("POST".equalsIgnoreCase(method)) {
+                try {
+                    String body = readBodyLimited(exchange);
+                    params.putAll(parseUrlEncodedPairs(body));
+                } catch (IOException e) {
+                    String html = CyberShieldWebUi.renderScannerPage(
+                        "",
+                        "Input Exceeds Limit",
+                        "The submitted request exceeds the maximum size limit.",
+                        HISTORY_STORE.getRecentScans(),
+                        false,
+                        activeChatRole,
+                        activeChatModel,
+                        new ArrayList<>(WEB_CHAT_MESSAGES),
+                        null,
+                        MANDATORY_DISCLAIMER
+                    );
+                    sendHtml(exchange, 413, html);
+                    return;
+                }
+            }
+            boolean chatOpen = "open".equalsIgnoreCase(params.get("chat")) || "1".equals(params.get("chat"));
+            String rawUrl = params.getOrDefault("url", "");
+
+            ScanResultModel.AnalysisOutcome outcome = analyzeUrlStructured(rawUrl);
+            if (!outcome.valid || outcome.result == null) {
+                String html = CyberShieldWebUi.renderScannerPage(
+                    redactSensitiveInput(rawUrl),
+                    outcome.errorTitle != null ? outcome.errorTitle : "Invalid URL Input",
+                    outcome.errorMessage != null ? outcome.errorMessage : "Please enter a single valid HTTP or HTTPS URL.",
+                    HISTORY_STORE.getRecentScans(),
+                    chatOpen,
+                    activeChatRole,
+                    activeChatModel,
+                    new ArrayList<>(WEB_CHAT_MESSAGES),
+                    null,
+                    MANDATORY_DISCLAIMER
+                );
+                sendHtml(exchange, 200, html);
+                return;
+            }
+
+            String html = CyberShieldWebUi.renderResultsPage(
+                outcome.result,
+                chatOpen,
+                activeChatRole,
+                activeChatModel,
+                new ArrayList<>(WEB_CHAT_MESSAGES),
+                null
+            );
+            sendHtml(exchange, 200, html);
+        }
+    }
+
+    /**
+     * Handles POST /clear-history.
+     */
+    static class WebClearHistoryHandler implements HttpHandler {
+        @Override
+        public void handle(HttpExchange exchange) throws IOException {
+            if (!allowRateLimit(extractClientIp(exchange))) {
+                sendHtml(exchange, 429, "<!DOCTYPE html><html><body><h1>429 Too Many Requests</h1></body></html>");
+                return;
+            }
+            if (!"POST".equalsIgnoreCase(exchange.getRequestMethod())) {
+                sendRedirect(exchange, "/");
+                return;
+            }
+            HISTORY_STORE.clear();
+            sendRedirect(exchange, "/");
+        }
+    }
+
+    /**
+     * Handles GET /export?url=...&format=txt|json.
+     */
+    static class WebExportHandler implements HttpHandler {
+        @Override
+        public void handle(HttpExchange exchange) throws IOException {
+            if (!allowRateLimit(extractClientIp(exchange))) {
+                sendHtml(exchange, 429, "<!DOCTYPE html><html><body><h1>429 Too Many Requests</h1></body></html>");
+                return;
+            }
+            if (!"GET".equalsIgnoreCase(exchange.getRequestMethod())) {
+                sendHtml(exchange, 405, "<!DOCTYPE html><html><body><h1>405 Method Not Allowed</h1></body></html>");
+                return;
+            }
+            Map<String, String> query = parseUrlEncodedPairs(exchange.getRequestURI().getRawQuery());
+            String url = query.getOrDefault("url", "");
+            String format = query.getOrDefault("format", "txt").toLowerCase(Locale.ROOT);
+
+            ScanResultModel.ScanResult result = HISTORY_STORE.findByUrl(url);
+            if (result == null && !url.isBlank()) {
+                ScanResultModel.AnalysisOutcome outcome = analyzeUrlStructured(url);
+                if (outcome.valid) {
+                    result = outcome.result;
+                }
+            }
+            if (result == null) {
+                sendRedirect(exchange, "/");
+                return;
+            }
+
+            applySecurityHeaders(exchange);
+            String safeHost = result.domain.hostname.replaceAll("[^a-zA-Z0-9.-]", "_");
+            if (safeHost.isEmpty()) safeHost = "domain";
+            if ("json".equals(format)) {
+                byte[] bytes = result.rawResultJson.getBytes(StandardCharsets.UTF_8);
+                exchange.getResponseHeaders().set("Content-Type", "application/json; charset=utf-8");
+                exchange.getResponseHeaders().set("Content-Disposition", "attachment; filename=\"cybershield-report-" + safeHost + ".json\"");
+                exchange.sendResponseHeaders(200, bytes.length);
                 try (OutputStream os = exchange.getResponseBody()) {
-                    os.write(msg);
+                    os.write(bytes);
                 }
                 return;
             }
 
-            byte[] content = Files.readAllBytes(target);
-            String contentType = guessContentType(target.getFileName().toString());
-            exchange.getResponseHeaders().set("Content-Type", contentType);
-            exchange.getResponseHeaders().set("X-Powered-By", "CyberShield-Java-17");
-            exchange.sendResponseHeaders(200, content.length);
+            String txtContent = ScanResultModel.formatTxtReport(result);
+            byte[] bytes = txtContent.getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().set("Content-Type", "text/plain; charset=utf-8");
+            exchange.getResponseHeaders().set("Content-Disposition", "attachment; filename=\"cybershield-report-" + safeHost + ".txt\"");
+            exchange.sendResponseHeaders(200, bytes.length);
             try (OutputStream os = exchange.getResponseBody()) {
-                os.write(content);
+                os.write(bytes);
             }
         }
+    }
 
-        private String guessContentType(String filename) {
-            String lower = filename.toLowerCase(Locale.ROOT);
-            if (lower.endsWith(".html")) return "text/html; charset=utf-8";
-            if (lower.endsWith(".js") || lower.endsWith(".mjs")) return "application/javascript; charset=utf-8";
-            if (lower.endsWith(".css")) return "text/css; charset=utf-8";
-            if (lower.endsWith(".json")) return "application/json; charset=utf-8";
-            if (lower.endsWith(".svg")) return "image/svg+xml";
-            if (lower.endsWith(".png")) return "image/png";
-            if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "image/jpeg";
-            if (lower.endsWith(".ico")) return "image/x-icon";
-            if (lower.endsWith(".woff2")) return "font/woff2";
-            if (lower.endsWith(".woff")) return "font/woff";
-            return "application/octet-stream";
+    /**
+     * Handles POST /chat for the server-rendered Security Advisor.
+     */
+    static class WebChatHandler implements HttpHandler {
+        @Override
+        public void handle(HttpExchange exchange) throws IOException {
+            if (!allowRateLimit(extractClientIp(exchange))) {
+                sendHtml(exchange, 429, "<!DOCTYPE html><html><body><h1>429 Too Many Requests</h1></body></html>");
+                return;
+            }
+            if (!"POST".equalsIgnoreCase(exchange.getRequestMethod())) {
+                sendRedirect(exchange, "/?chat=open");
+                return;
+            }
+            String body;
+            try {
+                body = readBodyWithLimit(exchange, 16384);
+            } catch (IOException e) {
+                sendRedirect(exchange, "/?chat=open");
+                return;
+            }
+            Map<String, String> form = parseUrlEncodedPairs(body);
+
+            String action = form.getOrDefault("action", "send");
+            String rolePreset = normalizeRolePreset(form.getOrDefault("rolePreset", activeChatRole));
+            String model = normalizeGeminiModel(form.getOrDefault("model", activeChatModel));
+            String activeUrl = redactSensitiveInput(form.getOrDefault("activeUrl", "").trim());
+            activeChatRole = rolePreset;
+            activeChatModel = model;
+
+            if ("reset".equalsIgnoreCase(action)) {
+                resetWebChatMessages(rolePreset);
+            } else {
+                String userMessage = form.getOrDefault("quickPrompt", "").trim();
+                if (userMessage.isEmpty()) {
+                    userMessage = form.getOrDefault("message", "").trim();
+                }
+                if (userMessage.length() > MAX_CHAT_MESSAGE_LENGTH) {
+                    userMessage = userMessage.substring(0, MAX_CHAT_MESSAGE_LENGTH);
+                }
+                userMessage = redactSensitiveInput(userMessage);
+                if (!userMessage.isEmpty()) {
+                    WEB_CHAT_MESSAGES.add(new CyberShieldWebUi.ChatMessageView("user", userMessage, currentShortTime(), null));
+                    while (WEB_CHAT_MESSAGES.size() > MAX_WEB_CHAT_MESSAGES) {
+                        WEB_CHAT_MESSAGES.remove(0);
+                    }
+
+                    ScanResultModel.ScanResult activeScan = HISTORY_STORE.findByUrl(activeUrl);
+                    String scanContext = ScanResultModel.formatScanContextForAdvisor(activeScan);
+                    List<ChatTurn> turns = new ArrayList<>();
+                    for (CyberShieldWebUi.ChatMessageView m : WEB_CHAT_MESSAGES) {
+                        turns.add(new ChatTurn(m.role, m.text));
+                    }
+
+                    String systemInstruction = buildRoleSystemInstruction(rolePreset, scanContext);
+                    String payload = buildGeminiRequestPayload(systemInstruction, turns);
+                    String replyText = GEMINI_SERVICE.generateContent(model, payload);
+                    if (replyText == null && !"gemini-3-flash-preview".equals(model)) {
+                        replyText = GEMINI_SERVICE.generateContent("gemini-3-flash-preview", payload);
+                    }
+                    if (replyText == null || replyText.isBlank()) {
+                        replyText = generateContextualAnalystReply(rolePreset, scanContext, turns);
+                    }
+                    WEB_CHAT_MESSAGES.add(new CyberShieldWebUi.ChatMessageView("model", replyText, currentShortTime(), null));
+                    while (WEB_CHAT_MESSAGES.size() > MAX_WEB_CHAT_MESSAGES) {
+                        WEB_CHAT_MESSAGES.remove(0);
+                    }
+                }
+            }
+
+            if (!activeUrl.isEmpty()) {
+                ScanResultModel.ScanResult activeResult = HISTORY_STORE.findByUrl(activeUrl);
+                if (activeResult == null) {
+                    ScanResultModel.AnalysisOutcome out = analyzeUrlStructured(activeUrl);
+                    if (out.valid) activeResult = out.result;
+                }
+                if (activeResult != null) {
+                    String html = CyberShieldWebUi.renderResultsPage(
+                        activeResult,
+                        true,
+                        activeChatRole,
+                        activeChatModel,
+                        new ArrayList<>(WEB_CHAT_MESSAGES),
+                        null
+                    );
+                    sendHtml(exchange, 200, html);
+                    return;
+                }
+            }
+
+            String html = CyberShieldWebUi.renderScannerPage(
+                "",
+                null,
+                null,
+                HISTORY_STORE.getRecentScans(),
+                true,
+                activeChatRole,
+                activeChatModel,
+                new ArrayList<>(WEB_CHAT_MESSAGES),
+                null,
+                MANDATORY_DISCLAIMER
+            );
+            sendHtml(exchange, 200, html);
         }
+    }
+
+    private static String normalizeRolePreset(String role) {
+        if ("scam-educator".equalsIgnoreCase(role)) return "scam-educator";
+        if ("incident-advisor".equalsIgnoreCase(role)) return "incident-advisor";
+        return "threat-analyst";
     }
 
     private static boolean allowRateLimit(String clientIp) {
         long now = System.currentTimeMillis();
-        RateBucket bucket = RATE_LIMITS.compute(clientIp, (k, existing) -> {
+        if (RATE_LIMITS.size() > MAX_RATE_BUCKETS) {
+            RATE_LIMITS.entrySet().removeIf(e -> now - e.getValue().windowStart > RATE_LIMIT_WINDOW_MS);
+            if (RATE_LIMITS.size() > MAX_RATE_BUCKETS) {
+                RATE_LIMITS.clear();
+            }
+        }
+        String key = clientIp == null ? "local" : clientIp;
+        RateBucket bucket = RATE_LIMITS.compute(key, (k, existing) -> {
             if (existing == null || now - existing.windowStart > RATE_LIMIT_WINDOW_MS) {
                 return new RateBucket(1, now);
             }
@@ -283,15 +678,15 @@ public class CyberShieldServer {
 
     private static void sendJson(HttpExchange exchange, int statusCode, String jsonBody) throws IOException {
         byte[] bytes = jsonBody.getBytes(StandardCharsets.UTF_8);
+        applySecurityHeaders(exchange);
         exchange.getResponseHeaders().set("Content-Type", "application/json; charset=utf-8");
-        exchange.getResponseHeaders().set("X-Powered-By", "CyberShield-Java-17");
         exchange.sendResponseHeaders(statusCode, bytes.length);
         try (OutputStream os = exchange.getResponseBody()) {
             os.write(bytes);
         }
     }
 
-    private static String jsonEscape(String s) {
+    public static String jsonEscape(String s) {
         if (s == null) return "";
         StringBuilder sb = new StringBuilder(s.length() + 16);
         for (int i = 0; i < s.length(); i++) {
@@ -366,50 +761,32 @@ public class CyberShieldServer {
     static class HealthHandler implements HttpHandler {
         @Override
         public void handle(HttpExchange exchange) throws IOException {
-            String javaVersion = System.getProperty("java.version", "17");
-            String vendor = System.getProperty("java.vendor", "OpenJDK");
-            String json = "{"
-                + "\"status\":\"UP\","
-                + "\"backend\":\"Pure Java 17 HttpServer\","
-                + "\"javaVersion\":\"" + jsonEscape(javaVersion) + "\","
-                + "\"jvmVendor\":\"" + jsonEscape(vendor) + "\","
-                + "\"timestamp\":\"" + Instant.now().toString() + "\""
-                + "}";
-            sendJson(exchange, 200, json);
+            if (!allowRateLimit(extractClientIp(exchange))) {
+                sendJson(exchange, 429, "{\"error\":\"Rate limit reached\"}");
+                return;
+            }
+            if (!"GET".equalsIgnoreCase(exchange.getRequestMethod())) {
+                sendJson(exchange, 405, "{\"error\":\"Method not allowed\"}");
+                return;
+            }
+            sendJson(exchange, 200, "{\"status\":\"ok\"}");
         }
     }
 
     static class ReputationStatusHandler implements HttpHandler {
         @Override
         public void handle(HttpExchange exchange) throws IOException {
+            if (!allowRateLimit(extractClientIp(exchange))) {
+                sendJson(exchange, 429, "{\"error\":\"Rate limit reached\"}");
+                return;
+            }
             if (!"GET".equalsIgnoreCase(exchange.getRequestMethod())) {
                 sendJson(exchange, 405, "{\"error\":\"Method not allowed\"}");
                 return;
             }
-            List<String> providers = new ArrayList<>();
             String sbKey = System.getenv("SAFE_BROWSING_API_KEY");
-            String vtKey = System.getenv("VIRUSTOTAL_API_KEY");
-            if (sbKey != null && !sbKey.trim().isEmpty()) {
-                providers.add("Google Safe Browsing");
-            }
-            if (vtKey != null && !vtKey.trim().isEmpty()) {
-                providers.add("VirusTotal");
-            }
-
-            StringBuilder provJson = new StringBuilder("[");
-            for (int i = 0; i < providers.size(); i++) {
-                if (i > 0) provJson.append(",");
-                provJson.append("\"").append(jsonEscape(providers.get(i))).append("\"");
-            }
-            provJson.append("]");
-
-            String javaVersion = System.getProperty("java.version", "17");
-            String json = "{"
-                + "\"configured\":" + (!providers.isEmpty()) + ","
-                + "\"providers\":" + provJson + ","
-                + "\"backendRuntime\":\"Java " + jsonEscape(javaVersion) + " (OpenJDK HttpServer)\""
-                + "}";
-            sendJson(exchange, 200, json);
+            boolean configured = sbKey != null && !sbKey.trim().isEmpty() && !"YOUR_API_KEY".equalsIgnoreCase(sbKey.trim());
+            sendJson(exchange, 200, "{\"configured\":" + configured + "}");
         }
     }
 
@@ -420,10 +797,7 @@ public class CyberShieldServer {
                 sendJson(exchange, 405, "{\"error\":\"Method not allowed\"}");
                 return;
             }
-            String clientIp = exchange.getRemoteAddress() != null
-                ? exchange.getRemoteAddress().getAddress().getHostAddress()
-                : "local";
-            if (!allowRateLimit(clientIp)) {
+            if (!allowRateLimit(extractClientIp(exchange))) {
                 sendJson(exchange, 429, "{"
                     + "\"checked\":false,"
                     + "\"status\":\"unavailable\","
@@ -454,28 +828,39 @@ public class CyberShieldServer {
                 return;
             }
 
-            String resultJson = queryExternalReputation(url.trim());
+            String redactedTarget = redactSensitiveInput(url.trim());
+            String resultJson = queryExternalReputation(redactedTarget, false);
             sendJson(exchange, 200, resultJson);
         }
     }
 
-    private static String queryExternalReputation(String normalizedUrl) {
+    private static String queryExternalReputation(String sanitizedUrl, boolean isPrivateOrLocal) {
+        if (isPrivateOrLocal) {
+            return "{"
+                + "\"checked\":false,"
+                + "\"status\":\"not_applicable\","
+                + "\"summaryLabel\":\"Private or local network address — external reputation lookup skipped.\","
+                + "\"providerName\":\"Not checked\","
+                + "\"lastCheckedAt\":null"
+                + "}";
+        }
         String sbKey = System.getenv("SAFE_BROWSING_API_KEY");
-        if (sbKey != null && !sbKey.trim().isEmpty()) {
+        if (sbKey != null && !sbKey.trim().isEmpty() && !"YOUR_API_KEY".equalsIgnoreCase(sbKey.trim())) {
             try {
-                String endpoint = "https://safebrowsing.googleapis.com/v4/threatMatches:find?key=" + sbKey.trim();
+                String endpoint = "https://safebrowsing.googleapis.com/v4/threatMatches:find";
                 String payload = "{"
-                    + "\"client\":{\"clientId\":\"cybershield-ai-java\",\"clientVersion\":\"1.0.0\"},"
+                    + "\"client\":{\"clientId\":\"cybershield-ai\",\"clientVersion\":\"1.0.0\"},"
                     + "\"threatInfo\":{"
                     + "\"threatTypes\":[\"MALWARE\",\"SOCIAL_ENGINEERING\",\"UNWANTED_SOFTWARE\",\"POTENTIALLY_HARMFUL_APPLICATION\"],"
                     + "\"platformTypes\":[\"ANY_PLATFORM\"],"
                     + "\"threatEntryTypes\":[\"URL\"],"
-                    + "\"threatEntries\":[{\"url\":\"" + jsonEscape(normalizedUrl) + "\"}]"
+                    + "\"threatEntries\":[{\"url\":\"" + jsonEscape(sanitizedUrl) + "\"}]"
                     + "}}";
                 HttpRequest req = HttpRequest.newBuilder()
                     .uri(URI.create(endpoint))
                     .timeout(Duration.ofMillis(3500))
                     .header("Content-Type", "application/json")
+                    .header("X-Goog-Api-Key", sbKey.trim())
                     .POST(HttpRequest.BodyPublishers.ofString(payload, StandardCharsets.UTF_8))
                     .build();
                 HttpResponse<String> resp = HTTP_CLIENT.send(req, HttpResponse.BodyHandlers.ofString());
@@ -485,10 +870,9 @@ public class CyberShieldServer {
                         return "{"
                             + "\"checked\":true,"
                             + "\"status\":\"flagged\","
-                            + "\"summaryLabel\":\"Flagged by Google Safe Browsing (Java Threat Intelligence Service)\","
+                            + "\"summaryLabel\":\"Flagged by Google Safe Browsing\","
                             + "\"providerName\":\"Google Safe Browsing\","
-                            + "\"lastCheckedAt\":\"" + Instant.now().toString() + "\","
-                            + "\"details\":\"Google Safe Browsing reported a threat match for this URL.\""
+                            + "\"lastCheckedAt\":\"" + Instant.now().toString() + "\""
                             + "}";
                     }
                     return "{"
@@ -512,7 +896,7 @@ public class CyberShieldServer {
         return "{"
             + "\"checked\":false,"
             + "\"status\":\"not_configured\","
-            + "\"summaryLabel\":\"Local URL heuristic analysis — external reputation not checked.\","
+            + "\"summaryLabel\":\"Not checked\","
             + "\"providerName\":\"Not checked\","
             + "\"lastCheckedAt\":null"
             + "}";
@@ -525,10 +909,7 @@ public class CyberShieldServer {
                 sendJson(exchange, 405, "{\"error\":\"Method not allowed\"}");
                 return;
             }
-            String clientIp = exchange.getRemoteAddress() != null
-                ? exchange.getRemoteAddress().getAddress().getHostAddress()
-                : "local";
-            if (!allowRateLimit(clientIp)) {
+            if (!allowRateLimit(extractClientIp(exchange))) {
                 sendJson(exchange, 429, "{\"valid\":false,\"errorTitle\":\"Rate Limit Reached\",\"error\":\"Too many scan requests. Please wait a moment and try again.\"}");
                 return;
             }
@@ -550,12 +931,14 @@ public class CyberShieldServer {
     static class ScanHistoryHandler implements HttpHandler {
         @Override
         public void handle(HttpExchange exchange) throws IOException {
+            if (!allowRateLimit(extractClientIp(exchange))) {
+                sendJson(exchange, 429, "{\"error\":\"Rate limit reached\"}");
+                return;
+            }
             String method = exchange.getRequestMethod();
             if ("GET".equalsIgnoreCase(method)) {
                 String json = "{"
                     + "\"count\":" + HISTORY_STORE.size() + ","
-                    + "\"maxItems\":" + ScanHistoryJavaStore.MAX_HISTORY_ITEMS + ","
-                    + "\"backend\":\"Java 17 ScanHistoryJavaStore\","
                     + "\"history\":" + HISTORY_STORE.toJsonArray()
                     + "}";
                 sendJson(exchange, 200, json);
@@ -575,7 +958,11 @@ public class CyberShieldServer {
         public final String text;
         public ChatTurn(String role, String text) {
             this.role = "model".equalsIgnoreCase(role) ? "model" : "user";
-            this.text = text == null ? "" : text.trim();
+            String clean = text == null ? "" : redactSensitiveInput(text.trim());
+            if (clean.length() > MAX_CHAT_MESSAGE_LENGTH) {
+                clean = clean.substring(0, MAX_CHAT_MESSAGE_LENGTH);
+            }
+            this.text = clean;
         }
     }
 
@@ -598,11 +985,11 @@ public class CyberShieldServer {
     }
 
     public static String normalizeGeminiModel(String requestedModel) {
-        if (requestedModel == null) return "gemini-3.8-flash";
+        if (requestedModel == null) return "gemini-3-flash-preview";
         String clean = requestedModel.trim().toLowerCase(Locale.ROOT);
-        if ("gemini-4-argon".equals(clean)) return "gemini-4-argon";
-        if ("gemini-3.1-flash-lite".equals(clean)) return "gemini-3.1-flash-lite";
-        return "gemini-3.8-flash";
+        if ("gemini-3.1-pro-preview".equals(clean)) return "gemini-3.1-pro-preview";
+        if ("gemini-3.1-flash-lite-preview".equals(clean)) return "gemini-3.1-flash-lite-preview";
+        return "gemini-3-flash-preview";
     }
 
     public static String buildRoleSystemInstruction(String rolePreset, String scanContext) {
@@ -610,15 +997,15 @@ public class CyberShieldServer {
         if ("scam-educator".equalsIgnoreCase(rolePreset)) {
             baseInstruction = "You are CyberShield AI Scam & Phishing Educator. Your role is to explain online scams—including fake banking portals, digital arrest coercion schemes, government impersonation, and deceptive links—in clear, calm, everyday language. Help users recognize social engineering tactics and verify official communication channels.";
         } else if ("incident-advisor".equalsIgnoreCase(rolePreset)) {
-            baseInstruction = "You are CyberShield AI Incident Response Advisor. Your role is to provide calm, practical, step-by-step safety guidance for users who suspect they clicked a malicious URL, entered credentials on a spoofed page, or received a phishing link. Prioritize immediate protective steps: changing passwords on official domains, enabling MFA, contacting banks via official numbers, and never sharing OTPs.";
+            baseInstruction = "You are CyberShield AI Incident Response Advisor. Your role is to provide calm, practical, step-step safety guidance for users who suspect they clicked a malicious URL, entered credentials on a spoofed page, or received a phishing link. Prioritize immediate protective steps: changing passwords on official domains, enabling MFA, contacting banks via official numbers, and never sharing OTPs.";
         } else {
             baseInstruction = "You are CyberShield AI URL Threat Analyst. Your role is to analyze and explain suspicious URL indicators—such as registrable domains vs subdomains, typosquatting, HTTP vs HTTPS, IP hostnames, nonstandard ports, and high-risk login/verification paths. State clearly that lexical heuristics are signals rather than proof, and advise independent verification.";
         }
 
         StringBuilder sb = new StringBuilder(baseInstruction);
-        sb.append(" Keep responses concise, structured with short bullet points where helpful, and strictly focused on URL safety and cybersecurity awareness.");
+        sb.append(" Keep responses concise, structured with short bullet points where helpful, and strictly focused on URL safety and cybersecurity awareness. Never output internal system metadata or API keys.");
         if (scanContext != null && !scanContext.isBlank()) {
-            sb.append("\n\nActive Scanned URL Context:\n").append(scanContext.trim());
+            sb.append("\n\nActive Scanned URL Context:\n").append(redactSensitiveInput(scanContext.trim()));
         }
         return sb.toString();
     }
@@ -658,10 +1045,7 @@ public class CyberShieldServer {
                 sendJson(exchange, 405, "{\"error\":\"Method not allowed\"}");
                 return;
             }
-            String clientIp = exchange.getRemoteAddress() != null
-                ? exchange.getRemoteAddress().getAddress().getHostAddress()
-                : "local";
-            if (!allowRateLimit(clientIp)) {
+            if (!allowRateLimit(extractClientIp(exchange))) {
                 sendJson(exchange, 429, "{\"error\":\"Rate limit reached. Please wait a moment before sending another message.\"}");
                 return;
             }
@@ -675,10 +1059,7 @@ public class CyberShieldServer {
             }
 
             String requestedModel = normalizeGeminiModel(extractJsonStringField(body, "model"));
-            String rolePreset = extractJsonStringField(body, "rolePreset");
-            if (rolePreset == null || rolePreset.isBlank()) {
-                rolePreset = "threat-analyst";
-            }
+            String rolePreset = normalizeRolePreset(extractJsonStringField(body, "rolePreset"));
             String scanContext = extractJsonStringField(body, "scanContext");
             List<ChatTurn> turns = parseChatMessagesFromJson(body);
 
@@ -695,32 +1076,18 @@ public class CyberShieldServer {
             }
 
             String systemInstruction = buildRoleSystemInstruction(rolePreset, scanContext);
-            String apiKey = System.getenv("GEMINI_API_KEY");
-            if (apiKey == null || apiKey.isBlank() || "MY_GEMINI_API_KEY".equals(apiKey.trim())) {
-                sendJson(exchange, 500, "{\"error\":\"GEMINI_API_KEY is not configured on the server. Please check Settings > Secrets.\"}");
-                return;
-            }
-
             String payload = buildGeminiRequestPayload(systemInstruction, turns);
-            String usedModel = requestedModel;
-            String replyText = null;
-
-            if (apiKey != null && !apiKey.isBlank() && !"MY_GEMINI_API_KEY".equals(apiKey.trim())) {
-                replyText = GEMINI_SERVICE.generateContent(usedModel, apiKey.trim(), payload);
-                if (replyText == null && !"gemini-3.8-flash".equals(usedModel)) {
-                    usedModel = "gemini-3.8-flash";
-                    replyText = GEMINI_SERVICE.generateContent(usedModel, apiKey.trim(), payload);
-                }
+            String replyText = GEMINI_SERVICE.generateContent(requestedModel, payload);
+            if (replyText == null && !"gemini-3-flash-preview".equals(requestedModel)) {
+                replyText = GEMINI_SERVICE.generateContent("gemini-3-flash-preview", payload);
             }
 
             if (replyText == null || replyText.isBlank()) {
-                replyText = generateContextualAnalystReply(rolePreset, requestedModel, scanContext, turns);
-                usedModel = requestedModel;
+                replyText = generateContextualAnalystReply(rolePreset, scanContext, turns);
             }
 
             String responseJson = "{"
                 + "\"reply\":\"" + jsonEscape(replyText) + "\","
-                + "\"model\":\"" + jsonEscape(usedModel) + "\","
                 + "\"rolePreset\":\"" + jsonEscape(rolePreset) + "\","
                 + "\"timestamp\":\"" + Instant.now().toString() + "\""
                 + "}";
@@ -750,10 +1117,7 @@ public class CyberShieldServer {
                 sendJson(exchange, 405, "{\"error\":\"Method not allowed\"}");
                 return;
             }
-            String clientIp = exchange.getRemoteAddress() != null
-                ? exchange.getRemoteAddress().getAddress().getHostAddress()
-                : "local";
-            if (!allowRateLimit(clientIp)) {
+            if (!allowRateLimit(extractClientIp(exchange))) {
                 sendJson(exchange, 429, "{\"error\":\"Rate limit reached. Please wait a moment before transcribing more audio.\"}");
                 return;
             }
@@ -781,14 +1145,8 @@ public class CyberShieldServer {
                 ? "Transcribe this audio. If a domain or URL is spoken, output the domain or URL clearly without extra commentary."
                 : "Transcribe this audio.";
 
-            String apiKey = System.getenv("GEMINI_API_KEY");
-            if (apiKey == null || apiKey.isBlank() || "MY_GEMINI_API_KEY".equals(apiKey.trim())) {
-                sendJson(exchange, 500, "{\"error\":\"GEMINI_API_KEY is not configured on the server. Please check Settings > Secrets.\"}");
-                return;
-            }
-
             String payload = buildGeminiTranscribePayload(base64Audio.trim(), mimeType, prompt);
-            String transcript = GEMINI_SERVICE.transcribeAudio(apiKey.trim(), payload);
+            String transcript = GEMINI_SERVICE.transcribeAudio(payload);
 
             if (transcript == null || transcript.isBlank()) {
                 transcript = "url".equalsIgnoreCase(mode)
@@ -797,8 +1155,7 @@ public class CyberShieldServer {
             }
 
             String responseJson = "{"
-                + "\"transcript\":\"" + jsonEscape(transcript) + "\","
-                + "\"model\":\"" + GEMINI_TRANSCRIBE_MODEL + "\","
+                + "\"transcript\":\"" + jsonEscape(redactSensitiveInput(transcript)) + "\","
                 + "\"timestamp\":\"" + Instant.now().toString() + "\""
                 + "}";
             sendJson(exchange, 200, responseJson);
@@ -807,16 +1164,13 @@ public class CyberShieldServer {
 
     private static String generateContextualAnalystReply(
         String rolePreset,
-        String model,
         String scanContext,
         List<ChatTurn> turns
     ) {
         String latestUserMsg = "";
-        int userTurnCount = 0;
         for (ChatTurn t : turns) {
             if ("user".equals(t.role)) {
                 latestUserMsg = t.text;
-                userTurnCount++;
             }
         }
         String lowerMsg = latestUserMsg.toLowerCase(Locale.ROOT);
@@ -846,10 +1200,7 @@ public class CyberShieldServer {
         }
 
         if (scanContext != null && !scanContext.isBlank()) {
-            sb.append("\n\nActive Scanned URL Reference:\n").append(scanContext.trim());
-        }
-        if (userTurnCount > 1) {
-            sb.append("\n\n(Conversation Turn #").append(userTurnCount).append(" · Active Role: ").append(rolePreset).append(")");
+            sb.append("\n\nActive Scanned URL Reference:\n").append(redactSensitiveInput(scanContext.trim()));
         }
         return sb.toString();
     }
@@ -864,6 +1215,24 @@ public class CyberShieldServer {
             if (n < 0 || n > 255) return false;
         }
         return true;
+    }
+
+    private static boolean isPrivateOrLoopbackHost(String hostname) {
+        String clean = hostname.trim().toLowerCase(Locale.ROOT);
+        if ("localhost".equals(clean) || clean.endsWith(".localhost") || clean.endsWith(".local")
+            || "[::1]".equals(clean) || "[0:0:0:0:0:0:0:1]".equals(clean)) {
+            return true;
+        }
+        if (clean.matches("^(?:\\d{1,3}\\.){3}\\d{1,3}$")) {
+            String[] parts = clean.split("\\.");
+            int o1 = Integer.parseInt(parts[0]);
+            int o2 = Integer.parseInt(parts[1]);
+            if (o1 == 10 || o1 == 127 || o1 == 0) return true;
+            if (o1 == 192 && o2 == 168) return true;
+            if (o1 == 172 && o2 >= 16 && o2 <= 31) return true;
+            if (o1 == 169 && o2 == 254) return true;
+        }
+        return false;
     }
 
     private static String[] parseHostnameParts(String hostname) {
@@ -958,24 +1327,43 @@ public class CyberShieldServer {
                 + "\"reasonItMatters\":\"" + jsonEscape(reasonItMatters) + "\""
                 + "}";
         }
+
+        ScanResultModel.IndicatorItem toModel() {
+            return new ScanResultModel.IndicatorItem(id, name, severity, weight, explanation, component, reasonItMatters);
+        }
+    }
+
+    private static ScanResultModel.AnalysisOutcome invalidOutcome(String title, String message) {
+        String json = "{\"valid\":false,\"errorTitle\":\"" + jsonEscape(title) + "\",\"error\":\"" + jsonEscape(message) + "\"}";
+        return ScanResultModel.AnalysisOutcome.invalid(title, message, json);
     }
 
     public static String analyzeUrlInJava(String rawInput) {
+        return analyzeUrlStructured(rawInput).responseJson;
+    }
+
+    public static ScanResultModel.AnalysisOutcome analyzeUrlStructured(String rawInput) {
         String trimmed = rawInput == null ? "" : rawInput.trim();
         if (trimmed.isEmpty()) {
-            return "{\"valid\":false,\"errorTitle\":\"Empty URL Input\",\"error\":\"Please enter a single URL or domain name to analyze (for example, https://example.com).\"}";
+            return invalidOutcome("Empty URL Input", "Please enter a single URL or domain name to analyze (for example, https://example.com).");
         }
         if (trimmed.length() > 2048) {
-            return "{\"valid\":false,\"errorTitle\":\"Input Exceeds Maximum Length\",\"error\":\"The submitted text is over 2,048 characters long. Please submit a single valid URL.\"}";
+            return invalidOutcome("Input Exceeds Maximum Length", "The submitted text is over 2,048 characters long. Please submit a single valid URL.");
+        }
+        for (int i = 0; i < trimmed.length(); i++) {
+            char c = trimmed.charAt(i);
+            if (c < 0x20 || c == 0x7F) {
+                return invalidOutcome("Invalid Control Characters", "The URL contains disallowed control characters.");
+            }
         }
         if (trimmed.matches(".*\\s+.*")) {
             Matcher multiHttp = Pattern.compile("(?i)https?://").matcher(trimmed);
             int count = 0;
             while (multiHttp.find()) count++;
             if (count > 1) {
-                return "{\"valid\":false,\"errorTitle\":\"Multiple URLs Detected\",\"error\":\"CyberShield AI analyzes one URL at a time. Please submit a single URL without extra text or spaces.\"}";
+                return invalidOutcome("Multiple URLs Detected", "CyberShield AI analyzes one URL at a time. Please submit a single URL without extra text or spaces.");
             }
-            return "{\"valid\":false,\"errorTitle\":\"Embedded Whitespace or Message Text Detected\",\"error\":\"This tool only scans single URLs, not text messages or paragraphs. Remove spaces and surrounding text before scanning.\"}";
+            return invalidOutcome("Embedded Whitespace or Message Text Detected", "This tool only scans single URLs, not text messages or paragraphs. Remove spaces and surrounding text before scanning.");
         }
 
         String candidate = trimmed;
@@ -986,7 +1374,7 @@ public class CyberShieldServer {
                 String afterColon = trimmed.substring(scheme.length());
                 boolean looksLikeHostPort = scheme.contains(".") && afterColon.matches("^\\d{1,5}(/.*|$)");
                 if (!looksLikeHostPort) {
-                    return "{\"valid\":false,\"errorTitle\":\"Unsupported Protocol (" + jsonEscape(scheme) + ")\",\"error\":\"Only standard web links (http:// and https://) can be analyzed. Links using \\\"" + jsonEscape(scheme) + "\\\" are blocked for security reasons.\"}";
+                    return invalidOutcome("Unsupported Protocol (" + scheme + ")", "Only standard web links (http:// and https://) can be analyzed. Links using \"" + scheme + "\" are blocked for security reasons.");
                 }
                 candidate = "https://" + trimmed;
             }
@@ -996,19 +1384,28 @@ public class CyberShieldServer {
 
         String withoutScheme = candidate.replaceFirst("(?i)^https?://", "");
         String authorityPart = withoutScheme.split("[/?#]", 2)[0];
+        if (authorityPart.contains("\\")) {
+            return invalidOutcome("Malformed URL Structure", "The URL authority contains invalid backslash characters.");
+        }
         boolean rawHadAuthorityAt = authorityPart.contains("@");
         String rawAuthorityPrefix = rawHadAuthorityAt ? authorityPart.substring(0, authorityPart.lastIndexOf('@')) : null;
+        // Strip any password after ':' in authority prefix so credentials are never inspected or echoed
+        String authorityUserOnly = null;
+        if (rawAuthorityPrefix != null) {
+            int colonIdx = rawAuthorityPrefix.indexOf(':');
+            authorityUserOnly = colonIdx >= 0 ? rawAuthorityPrefix.substring(0, colonIdx) : rawAuthorityPrefix;
+        }
 
         URI parsed;
         try {
             parsed = new URI(candidate);
         } catch (Exception e) {
-            return "{\"valid\":false,\"errorTitle\":\"Malformed URL Structure\",\"error\":\"The input could not be parsed as a valid web address. Check for typos in the domain name or protocol.\"}";
+            return invalidOutcome("Malformed URL Structure", "The input could not be parsed as a valid web address. Check for typos in the domain name or protocol.");
         }
 
         String protocolScheme = parsed.getScheme() == null ? "" : parsed.getScheme().toLowerCase(Locale.ROOT);
         if (!protocolScheme.equals("http") && !protocolScheme.equals("https")) {
-            return "{\"valid\":false,\"errorTitle\":\"Unsupported Protocol\",\"error\":\"Only HTTP and HTTPS web addresses are supported.\"}";
+            return invalidOutcome("Unsupported Protocol", "Only HTTP and HTTPS web addresses are supported.");
         }
 
         String host = parsed.getHost();
@@ -1022,26 +1419,26 @@ public class CyberShieldServer {
             }
         }
         if (host == null || host.isBlank()) {
-            return "{\"valid\":false,\"errorTitle\":\"Missing Hostname\",\"error\":\"The URL does not contain a valid domain name or IP address.\"}";
+            return invalidOutcome("Missing Hostname", "The URL does not contain a valid domain name or IP address.");
         }
 
         String hostname = host.toLowerCase(Locale.ROOT);
         boolean ipLiteral = isIpHostname(hostname);
         if (!ipLiteral) {
             if (hostname.startsWith(".") || hostname.endsWith(".") || hostname.contains("..")) {
-                return "{\"valid\":false,\"errorTitle\":\"Invalid Domain Name\",\"error\":\"The domain name contains invalid dot placement.\"}";
+                return invalidOutcome("Invalid Domain Name", "The domain name contains invalid dot placement.");
             }
             String[] labels = hostname.split("\\.");
             if (labels.length < 2) {
-                return "{\"valid\":false,\"errorTitle\":\"Incomplete Domain Name\",\"error\":\"\\\"" + jsonEscape(hostname) + "\\\" does not include a top-level domain (such as .com, .org, or .in).\"}";
+                return invalidOutcome("Incomplete Domain Name", "\"" + hostname + "\" does not include a top-level domain (such as .com, .org, or .in).");
             }
             String tldLabel = labels[labels.length - 1];
             if (tldLabel.length() < 2 || tldLabel.matches("^\\d+$")) {
-                return "{\"valid\":false,\"errorTitle\":\"Invalid Top-Level Domain\",\"error\":\"The top-level domain \\\"." + jsonEscape(tldLabel) + "\\\" is not a valid domain suffix.\"}";
+                return invalidOutcome("Invalid Top-Level Domain", "The top-level domain \"." + tldLabel + "\" is not a valid domain suffix.");
             }
             for (String label : labels) {
                 if (label.isEmpty() || !label.matches("^[a-zA-Z0-9-_]+$") || label.startsWith("-") || label.endsWith("-")) {
-                    return "{\"valid\":false,\"errorTitle\":\"Invalid Characters in Domain\",\"error\":\"The domain segment \\\"" + jsonEscape(label) + "\\\" contains invalid characters.\"}";
+                    return invalidOutcome("Invalid Characters in Domain", "The domain segment \"" + label + "\" contains invalid characters.");
                 }
             }
         }
@@ -1053,7 +1450,9 @@ public class CyberShieldServer {
 
         int portNum = parsed.getPort();
         String portStr = portNum > 0 ? String.valueOf(portNum) : "Default";
-        String path = (parsed.getRawPath() == null || parsed.getRawPath().isEmpty()) ? "/" : parsed.getRawPath();
+        String rawPath = (parsed.getRawPath() == null || parsed.getRawPath().isEmpty()) ? "/" : parsed.getRawPath();
+        // Redact any embedded API keys or secret tokens in path
+        String path = SECRET_TOKEN_PATTERN.matcher(rawPath).replaceAll("[REDACTED]");
         String rawQuery = parsed.getRawQuery();
 
         Set<String> queryKeys = new LinkedHashSet<>();
@@ -1073,14 +1472,16 @@ public class CyberShieldServer {
                     decodedK = k;
                     decodedV = v;
                 }
-                queryKeys.add(decodedK);
-                queryPairs.put(decodedK, decodedV);
+                String safeKey = decodedK.replaceAll("[^a-zA-Z0-9_.-]", "");
+                if (safeKey.isEmpty()) safeKey = "param";
+                queryKeys.add(safeKey);
+                queryPairs.put(safeKey, decodedV);
             }
         }
 
         String hostWithPort = portNum > 0 ? hostname + ":" + portNum : hostname;
         String baseUrl = protocolScheme + "://" + hostWithPort + path;
-        String normalizedUrl = baseUrl + (rawQuery != null && !rawQuery.isEmpty() ? "?" + rawQuery : "");
+        int fullRawUrlLength = baseUrl.length() + (rawQuery != null && !rawQuery.isEmpty() ? 1 + rawQuery.length() : 0);
         StringBuilder redactedSb = new StringBuilder(baseUrl);
         if (!queryKeys.isEmpty()) {
             redactedSb.append("?");
@@ -1090,10 +1491,12 @@ public class CyberShieldServer {
                 redactedSb.append(k).append("=[REDACTED]");
             }
         }
+        // Always use redactedUrl for storage, serialization, and UI so raw query secrets/credentials are never retained
         String redactedUrl = redactedSb.toString();
 
         boolean hasCredentials = rawHadAuthorityAt || (parsed.getRawUserInfo() != null && !parsed.getRawUserInfo().isEmpty());
         boolean isPunycode = hostname.contains("xn--");
+        boolean isPrivateNetwork = isPrivateOrLoopbackHost(hostname);
 
         boolean isOfficialBrand = false;
         for (BrandRule br : PROTECTED_BRANDS) {
@@ -1134,16 +1537,16 @@ public class CyberShieldServer {
             ));
         }
 
-        // 3. Authority @ deception (+25)
+        // 3. Authority @ deception (+25) — never echo raw credentials
         if (hasCredentials) {
             indicators.add(new Indicator(
                 "authority-deception",
                 "Deceptive URL Authority Structure (@ Symbol)",
                 "Critical",
                 25,
-                "The URL contains an \"@\" symbol in the authority section, which can disguise the real destination host.",
-                (rawAuthorityPrefix != null ? rawAuthorityPrefix + "@" + hostname : "@" + hostname),
-                "Everything before \"@\" in a URL authority is treated as a username, while the browser actually navigates to the hostname after \"@\"."
+                "The URL contains an \"@\" symbol in the authority section (credentials redacted), which can disguise the real destination host.",
+                "[REDACTED]@" + hostname,
+                "Everything before \"@\" in a URL authority is treated as user info, while the browser actually navigates to the hostname after \"@\"."
             ));
         }
 
@@ -1214,14 +1617,14 @@ public class CyberShieldServer {
                 List<String> subTokens = Arrays.asList(subLower.split("[.-]"));
                 List<String> regSegList = Arrays.asList(regSegments);
                 for (String token : brand.tokens) {
-                    if (rawAuthorityPrefix != null && rawAuthorityPrefix.toLowerCase(Locale.ROOT).contains(token)) {
+                    if (authorityUserOnly != null && authorityUserOnly.toLowerCase(Locale.ROOT).contains(token)) {
                         indicators.add(new Indicator(
                             "brand-impersonation",
                             "Possible Brand Impersonation (" + brand.brandName + ")",
                             "High",
                             25,
-                            "The URL authority prefix before \"@\" references " + brand.brandName + " (\"" + rawAuthorityPrefix + "\"), but connects to \"" + registrableDomain + "\".",
-                            rawAuthorityPrefix,
+                            "The URL authority prefix before \"@\" references " + brand.brandName + ", but connects to \"" + registrableDomain + "\".",
+                            token + "@" + hostname,
                             "Placing a trusted brand name before @ is a deceptive URL trick."
                         ));
                         matchedBrandSignal = true;
@@ -1289,14 +1692,14 @@ public class CyberShieldServer {
         }
 
         // 8. Unusual URL length (+5)
-        if (normalizedUrl.length() > 120) {
+        if (fullRawUrlLength > 120) {
             indicators.add(new Indicator(
                 "unusual-url-length",
                 "Unusually Long URL",
                 "Informational",
                 5,
-                "The full URL is " + normalizedUrl.length() + " characters long.",
-                "Length: " + normalizedUrl.length() + " chars",
+                "The full URL is " + fullRawUrlLength + " characters long.",
+                "Length: " + fullRawUrlLength + " chars",
                 "Phishing URLs often use long paths and query strings to obscure redirect targets or session tracking."
             ));
         }
@@ -1315,12 +1718,12 @@ public class CyberShieldServer {
         }
 
         // 10. Suspicious URL encoding (+8)
-        String rawPathAndQuery = path + (rawQuery != null ? "?" + rawQuery : "");
+        String rawPathAndQuery = rawPath + (rawQuery != null ? "?" + rawQuery : "");
         Matcher encMatcher = Pattern.compile("%[0-9a-fA-F]{2}").matcher(rawPathAndQuery);
         List<String> encTokens = new ArrayList<>();
         while (encMatcher.find()) encTokens.add(encMatcher.group(0));
         boolean hasDoubleEnc = rawPathAndQuery.matches(".*%25[0-9a-fA-F]{2}.*");
-        boolean hasEncodedSlashOrAt = path.matches("(?i).*%(2f|40|3a).*");
+        boolean hasEncodedSlashOrAt = rawPath.matches("(?i).*%(2f|40|3a).*");
         if (encTokens.size() >= 4 || hasDoubleEnc || hasEncodedSlashOrAt) {
             indicators.add(new Indicator(
                 "suspicious-encoding",
@@ -1499,20 +1902,21 @@ public class CyberShieldServer {
                 + sorted.get(0).name.toLowerCase(Locale.ROOT) + " and " + sorted.get(1).name.toLowerCase(Locale.ROOT) + ".";
         }
 
-        String reputationJson = queryExternalReputation(normalizedUrl);
-
-        StringBuilder qKeysJson = new StringBuilder("[");
-        int kIdx = 0;
-        for (String k : queryKeys) {
-            if (kIdx++ > 0) qKeysJson.append(",");
-            qKeysJson.append("\"").append(jsonEscape(k)).append("\"");
+        String reputationJson = queryExternalReputation(redactedUrl, isPrivateNetwork);
+        String repSummary = extractJsonStringField(reputationJson, "summaryLabel");
+        if (repSummary == null || repSummary.isBlank()) {
+            repSummary = "Not checked";
         }
-        qKeysJson.append("]");
+        String repProvider = extractJsonStringField(reputationJson, "providerName");
+        String repCheckedAt = extractJsonStringField(reputationJson, "lastCheckedAt");
+        boolean repChecked = reputationJson.contains("\"checked\":true");
 
         StringBuilder indJson = new StringBuilder("[");
+        List<ScanResultModel.IndicatorItem> indicatorModels = new ArrayList<>();
         for (int i = 0; i < indicators.size(); i++) {
             if (i > 0) indJson.append(",");
             indJson.append(indicators.get(i).toJson());
+            indicatorModels.add(indicators.get(i).toModel());
         }
         indJson.append("]");
 
@@ -1523,17 +1927,16 @@ public class CyberShieldServer {
         }
         rulesJson.append("]");
 
-        String resultId = "scan_java_" + System.currentTimeMillis();
+        String resultId = "scan_" + System.currentTimeMillis();
+        String nowIso = Instant.now().toString();
         String resultObjectJson = "{"
-            + "\"id\":\"" + resultId + "\","
-            + "\"timestamp\":\"" + Instant.now().toString() + "\","
+            + "\"timestamp\":\"" + nowIso + "\","
             + "\"riskScore\":" + riskScore + ","
             + "\"classification\":\"" + classification + "\","
             + "\"summaryExplanation\":\"" + jsonEscape(summaryExplanation) + "\","
             + "\"disclaimer\":\"" + jsonEscape(MANDATORY_DISCLAIMER) + "\","
             + "\"domain\":{"
-            + "\"originalInput\":\"" + jsonEscape(trimmed) + "\","
-            + "\"normalizedUrl\":\"" + jsonEscape(normalizedUrl) + "\","
+            + "\"normalizedUrl\":\"" + jsonEscape(redactedUrl) + "\","
             + "\"redactedUrl\":\"" + jsonEscape(redactedUrl) + "\","
             + "\"protocol\":\"" + protocolScheme.toUpperCase(Locale.ROOT) + "\","
             + "\"hostname\":\"" + jsonEscape(hostname) + "\","
@@ -1542,13 +1945,8 @@ public class CyberShieldServer {
             + "\"tld\":\"" + jsonEscape(tld) + "\","
             + "\"port\":\"" + jsonEscape(portStr) + "\","
             + "\"path\":\"" + jsonEscape(path) + "\","
-            + "\"urlLength\":" + normalizedUrl.length() + ","
-            + "\"hostnameLength\":" + hostname.length() + ","
-            + "\"queryParamCount\":" + queryKeys.size() + ","
-            + "\"queryParamKeys\":" + qKeysJson + ","
-            + "\"hasCredentialsInAuthority\":" + hasCredentials + ","
-            + "\"isIpAddress\":" + ipLiteral + ","
-            + "\"isPunycode\":" + isPunycode
+            + "\"urlLength\":" + redactedUrl.length() + ","
+            + "\"queryParamCount\":" + queryKeys.size()
             + "},"
             + "\"indicators\":" + indJson + ","
             + "\"reputation\":" + reputationJson + ","
@@ -1559,12 +1957,61 @@ public class CyberShieldServer {
             + "}"
             + "}";
 
-        HISTORY_STORE.recordResult(resultObjectJson);
+        ScanResultModel.DomainDetails domainModel = new ScanResultModel.DomainDetails(
+            redactedUrl,
+            redactedUrl,
+            redactedUrl,
+            protocolScheme.toUpperCase(Locale.ROOT),
+            hostname,
+            registrableDomain,
+            subdomain,
+            tld,
+            portStr,
+            path,
+            redactedUrl.length(),
+            hostname.length(),
+            queryKeys.size(),
+            new ArrayList<>(queryKeys),
+            hasCredentials,
+            ipLiteral,
+            isPunycode
+        );
 
-        return "{"
+        ScanResultModel.ReputationStatus repModel = new ScanResultModel.ReputationStatus(
+            repChecked,
+            repChecked ? "checked" : "not_configured",
+            repSummary,
+            repProvider != null ? repProvider : "Not checked",
+            repCheckedAt
+        );
+
+        ScanResultModel.GuidanceDetails guidanceModel = new ScanResultModel.GuidanceDetails(
+            headline,
+            primaryAdvice,
+            UNIVERSAL_SAFETY_RULES
+        );
+
+        ScanResultModel.ScanResult structuredResult = new ScanResultModel.ScanResult(
+            resultId,
+            nowIso,
+            riskScore,
+            classification,
+            summaryExplanation,
+            MANDATORY_DISCLAIMER,
+            domainModel,
+            indicatorModels,
+            repModel,
+            guidanceModel,
+            resultObjectJson
+        );
+
+        HISTORY_STORE.recordStructuredResult(resultObjectJson, structuredResult);
+
+        String responseJson = "{"
             + "\"valid\":true,"
-            + "\"backendEngine\":\"Java " + jsonEscape(System.getProperty("java.version", "17")) + "\","
             + "\"result\":" + resultObjectJson
             + "}";
+
+        return ScanResultModel.AnalysisOutcome.success(structuredResult, responseJson);
     }
 }
