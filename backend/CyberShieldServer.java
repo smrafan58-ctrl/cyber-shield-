@@ -253,7 +253,7 @@ public class CyberShieldServer {
         Headers headers = exchange.getResponseHeaders();
         // Allow iframe embedding within AI Studio workspace and Cloud Run preview domains
         headers.set("Content-Security-Policy",
-            "default-src 'self' https: data: 'unsafe-inline' 'unsafe-eval'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https:; connect-src 'self' https:; frame-ancestors *; base-uri 'self'; form-action 'self'");
+            "default-src 'self' https: data: 'unsafe-inline' 'unsafe-eval'; script-src 'self' 'unsafe-inline' https://d3js.org; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https:; connect-src 'self' https:; frame-ancestors *; base-uri 'self'; form-action 'self'");
         headers.set("X-Content-Type-Options", "nosniff");
         headers.set("Referrer-Policy", "no-referrer");
         headers.set("Permissions-Policy", "geolocation=(), camera=(), microphone=(self), payment=(), usb=()");
@@ -319,6 +319,16 @@ public class CyberShieldServer {
                 return;
             }
             String reqPath = exchange.getRequestURI().getPath();
+            if ("/favicon.ico".equals(reqPath)) {
+                byte[] svg = "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='#C2410C'><path d='M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4z'/></svg>".getBytes(StandardCharsets.UTF_8);
+                applySecurityHeaders(exchange);
+                exchange.getResponseHeaders().set("Content-Type", "image/svg+xml");
+                exchange.sendResponseHeaders(200, svg.length);
+                try (OutputStream os = exchange.getResponseBody()) {
+                    os.write(svg);
+                }
+                return;
+            }
             if (reqPath != null && !reqPath.equals("/") && !reqPath.equals("/index.html")) {
                 sendHtml(exchange, 404, "<!DOCTYPE html><html><body><h1>404 Not Found</h1></body></html>");
                 return;

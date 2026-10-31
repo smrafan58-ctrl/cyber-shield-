@@ -11,7 +11,7 @@ app.use(express.json({ limit: '100kb' }));
 app.use((_req, res, next) => {
   res.setHeader(
     'Content-Security-Policy',
-    "default-src 'self' https: data: 'unsafe-inline' 'unsafe-eval'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https:; connect-src 'self' https:; frame-ancestors *; base-uri 'self'; form-action 'self'"
+    "default-src 'self' https: data: 'unsafe-inline' 'unsafe-eval'; script-src 'self' 'unsafe-inline' https://d3js.org; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https:; connect-src 'self' https:; frame-ancestors *; base-uri 'self'; form-action 'self'"
   );
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Referrer-Policy', 'no-referrer');
@@ -542,11 +542,107 @@ function renderHtmlPage(title: string, bodyContent: string): string {
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <script>
+    (function() {
+      // Pre-define inert window.ethereum / web3 stub so browser wallet extensions (e.g. MetaMask inpage.js)
+      // do not throw "Failed to connect to MetaMask" or "Error restoring session" in non-Web3 pages
+      try {
+        var noopProvider = {
+          isMetaMask: false,
+          isConnected: function() { return false; },
+          request: function() { return Promise.resolve(null); },
+          send: function() { return Promise.resolve(null); },
+          sendAsync: function(_p, cb) { if (typeof cb === 'function') cb(null, { result: null }); },
+          enable: function() { return Promise.resolve([]); },
+          on: function() { return this; },
+          removeListener: function() { return this; },
+          removeAllListeners: function() { return this; }
+        };
+        if (typeof window.ethereum === 'undefined') {
+          Object.defineProperty(window, 'ethereum', {
+            value: noopProvider,
+            writable: true,
+            configurable: true
+          });
+        }
+      } catch (_e) {}
+
+      function isExtensionNoise(str) {
+        if (!str) return false;
+        var s = String(str).toLowerCase();
+        return s.indexOf('metamask') !== -1 ||
+               s.indexOf('error restoring session') !== -1 ||
+               s.indexOf('failed to connect') !== -1 ||
+               s.indexOf('nkbihfbeogaeaoehlefnkodbefgpgknn') !== -1 ||
+               s.indexOf('chrome-extension://') !== -1 ||
+               s.indexOf('moz-extension://') !== -1 ||
+               s.indexOf('safari-web-extension://') !== -1 ||
+               s.indexOf('inpage.js') !== -1 ||
+               s.indexOf('contentscript.js') !== -1;
+      }
+      function checkArgs(args) {
+        for (var i = 0; i < args.length; i++) {
+          var a = args[i];
+          if (!a) continue;
+          if (typeof a === 'string' && isExtensionNoise(a)) return true;
+          if (typeof a === 'object') {
+            if (isExtensionNoise(a.message) || isExtensionNoise(a.stack) || isExtensionNoise(a.filename)) return true;
+            try { if (isExtensionNoise(JSON.stringify(a))) return true; } catch(err) {}
+          }
+        }
+        return false;
+      }
+      var origError = console.error;
+      var origWarn = console.warn;
+      var origInfo = console.info;
+      console.error = function() {
+        if (checkArgs(arguments)) return;
+        return origError.apply(console, arguments);
+      };
+      console.warn = function() {
+        if (checkArgs(arguments)) return;
+        return origWarn.apply(console, arguments);
+      };
+      console.info = function() {
+        if (checkArgs(arguments)) return;
+        return origInfo.apply(console, arguments);
+      };
+      window.onerror = function(msg, url, line, col, error) {
+        if (isExtensionNoise(msg) || isExtensionNoise(url) || (error && (isExtensionNoise(error.message) || isExtensionNoise(error.stack)))) {
+          return true;
+        }
+        return false;
+      };
+      window.addEventListener('error', function(e) {
+        var combined = (e.message || '') + ' ' + (e.filename || '') + ' ' + (e.error && e.error.stack ? e.error.stack : '');
+        if (isExtensionNoise(combined)) {
+          e.stopImmediatePropagation();
+          e.stopPropagation();
+          e.preventDefault();
+          return true;
+        }
+      }, true);
+      window.addEventListener('unhandledrejection', function(e) {
+        var r = e.reason;
+        var combined = r ? ((r.message || String(r)) + ' ' + (r.stack || '')) : '';
+        if (isExtensionNoise(combined)) {
+          e.stopImmediatePropagation();
+          e.stopPropagation();
+          e.preventDefault();
+          return true;
+        }
+      }, true);
+    })();
+  </script>
   <title>${htmlEscape(title)}</title>
   <meta name="description" content="CyberShield AI — URL Threat Detection & Cybersecurity Awareness Platform for analyzing suspicious links, phishing patterns, deceptive domains, and brand impersonation." />
+  <meta property="og:title" content="${htmlEscape(title)}" />
+  <meta property="og:description" content="URL Threat Detection & Cybersecurity Awareness Platform for analyzing suspicious links, phishing patterns, deceptive domains, and brand impersonation." />
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%23C2410C'%3E%3Cpath d='M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4z'/%3E%3C/svg%3E" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <script src="https://d3js.org/d3.v7.min.js" defer></script>
   <style>
     :root {
       --bg-canvas: #F7F4EE;
@@ -886,11 +982,13 @@ function renderHtmlPage(title: string, bodyContent: string): string {
     .dashboard-grid-12 { display: grid; grid-template-columns: repeat(12, 1fr); gap: 1.25rem; }
     .col-span-7 { grid-column: span 7; }
     .col-span-5 { grid-column: span 5; }
-    .score-hero-row { display: flex; gap: 2rem; align-items: center; margin-top: 1.5rem; }
-    .gauge-container { position: relative; width: 140px; height: 140px; flex-shrink: 0; }
-    .gauge-svg { transform: rotate(-90deg); }
-    .gauge-center { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; }
-    .gauge-big-num { font-family: var(--font-mono); font-size: 2.25rem; font-weight: 800; line-height: 1; }
+    .score-hero-row { display: flex; flex-wrap: wrap; gap: 1.75rem; align-items: center; margin-top: 1.25rem; }
+    .d3-gauge-card { display: flex; flex-direction: column; align-items: center; justify-content: center; background: var(--bg-subtle); border: 1px solid var(--border-soft); border-radius: 0.75rem; padding: 1rem 1.25rem 0.85rem; min-width: 240px; flex-shrink: 0; }
+    .d3-gauge-mount { position: relative; width: 220px; height: 135px; display: flex; align-items: center; justify-content: center; }
+    .d3-gauge-svg { width: 220px; height: 135px; overflow: visible; }
+    .d3-gauge-readout { text-align: center; margin-top: -0.25rem; }
+    .gauge-big-num { font-family: var(--font-mono); font-size: 2rem; font-weight: 800; line-height: 1; }
+    .threat-level-tier-badge { display: inline-flex; align-items: center; gap: 0.35rem; margin-top: 0.4rem; padding: 0.2rem 0.65rem; border-radius: 99px; font-family: var(--font-mono); font-size: 0.72rem; font-weight: 800; letter-spacing: 0.05em; text-transform: uppercase; }
     .classification-pill { display: inline-block; padding: 0.35rem 0.85rem; border-radius: 99px; font-size: 0.75rem; font-weight: 800; letter-spacing: 0.04em; text-transform: uppercase; }
     .summary-prose { font-size: 0.875rem; color: var(--text-body); margin-top: 0.75rem; line-height: 1.5; }
     .linear-meter-block { margin-top: 1.25rem; }
@@ -1303,6 +1401,121 @@ function renderHtmlPage(title: string, bodyContent: string): string {
         }
       }
 
+      // D3.js Threat Level Semicircular Gauge Initialization
+      function initD3ThreatGauge() {
+        var mount = document.getElementById('d3-threat-gauge');
+        if (!mount || typeof window.d3 === 'undefined') return;
+        var score = parseFloat(mount.getAttribute('data-score') || '0');
+        if (isNaN(score)) score = 0;
+        score = Math.max(0, Math.min(100, score));
+        var d3 = window.d3;
+        mount.innerHTML = '';
+
+        var width = 220;
+        var height = 135;
+        var cx = 110;
+        var cy = 108;
+        var innerR = 62;
+        var outerR = 84;
+
+        var svg = d3.select(mount)
+          .append('svg')
+          .attr('viewBox', '0 0 ' + width + ' ' + height)
+          .attr('class', 'd3-gauge-svg')
+          .attr('role', 'img')
+          .attr('aria-label', 'D3 Threat Level Gauge: ' + score + ' out of 100');
+
+        var g = svg.append('g')
+          .attr('transform', 'translate(' + cx + ',' + cy + ')');
+
+        var scale = d3.scaleLinear().domain([0, 100]).range([-Math.PI / 2, Math.PI / 2]);
+
+        var zones = [
+          { label: 'LOW', start: 0, end: 19, color: '#059669' },
+          { label: 'MEDIUM', start: 20, end: 44, color: '#D97706' },
+          { label: 'HIGH', start: 45, end: 100, color: '#DC2626' }
+        ];
+
+        var arcGen = d3.arc()
+          .innerRadius(innerR)
+          .outerRadius(outerR)
+          .startAngle(function(d) { return scale(d.start); })
+          .endAngle(function(d) { return scale(d.end); })
+          .padAngle(0.025)
+          .cornerRadius(3);
+
+        g.selectAll('.d3-zone-arc')
+          .data(zones)
+          .enter()
+          .append('path')
+          .attr('class', 'd3-zone-arc')
+          .attr('d', arcGen)
+          .attr('fill', function(d) { return d.color; })
+          .attr('opacity', function(d) {
+            var active = (score <= 19 && d.label === 'LOW') ||
+                         (score >= 20 && score <= 44 && d.label === 'MEDIUM') ||
+                         (score >= 45 && d.label === 'HIGH');
+            return active ? 1.0 : 0.32;
+          });
+
+        // Zone Labels
+        g.append('text')
+          .attr('x', -88).attr('y', 16)
+          .attr('text-anchor', 'start')
+          .attr('font-size', '9.5px')
+          .attr('font-weight', '700')
+          .attr('font-family', 'JetBrains Mono, monospace')
+          .attr('fill', '#047857')
+          .text('LOW');
+
+        g.append('text')
+          .attr('x', -18).attr('y', -91)
+          .attr('text-anchor', 'middle')
+          .attr('font-size', '9.5px')
+          .attr('font-weight', '700')
+          .attr('font-family', 'JetBrains Mono, monospace')
+          .attr('fill', '#B45309')
+          .text('MEDIUM');
+
+        g.append('text')
+          .attr('x', 88).attr('y', 16)
+          .attr('text-anchor', 'end')
+          .attr('font-size', '9.5px')
+          .attr('font-weight', '700')
+          .attr('font-family', 'JetBrains Mono, monospace')
+          .attr('fill', '#B91C1C')
+          .text('HIGH');
+
+        // Needle Group with D3 transition
+        var needleGroup = g.append('g')
+          .attr('class', 'd3-needle')
+          .attr('transform', 'rotate(-90)');
+
+        needleGroup.append('path')
+          .attr('d', 'M -3.5 0 L 0 -72 L 3.5 0 Z')
+          .attr('fill', '#1C1917');
+
+        needleGroup.append('circle')
+          .attr('cx', 0).attr('cy', 0).attr('r', 6.5)
+          .attr('fill', '#1C1917');
+
+        needleGroup.append('circle')
+          .attr('cx', 0).attr('cy', 0).attr('r', 2.5)
+          .attr('fill', '#FFFFFF');
+
+        var targetDeg = -90 + (score / 100) * 180;
+        needleGroup.transition()
+          .duration(750)
+          .attr('transform', 'rotate(' + targetDeg.toFixed(1) + ')');
+      }
+
+      if (document.readyState === 'complete' || document.readyState === 'interactive') {
+        setTimeout(initD3ThreatGauge, 60);
+      } else {
+        window.addEventListener('DOMContentLoaded', function() { setTimeout(initD3ThreatGauge, 60); });
+      }
+      window.addEventListener('load', initD3ThreatGauge);
+
       setupVoice(document.getElementById('btn-voice-input'), document.getElementById('url-scanner-input'));
       setupVoice(document.getElementById('btn-chat-mic'), document.getElementById('chat-user-input'));
     })();
@@ -1446,9 +1659,8 @@ function renderScannerPage(rawInput: string, errorMsg?: string): string {
 // Scan Results Page Renderer
 function renderResultsPage(res: ScanResult): string {
   const theme = getRiskTheme(res.classification);
-  const radius = 58;
-  const circumference = 2 * Math.PI * radius;
-  const strokeDashoffset = circumference - (res.riskScore / 100) * circumference;
+  const threatTier = res.riskScore >= 45 ? 'HIGH' : (res.riskScore >= 20 ? 'MEDIUM' : 'LOW');
+  const needleDeg = -90 + (Math.min(100, Math.max(0, res.riskScore)) / 100) * 180;
 
   const body = `
   <main class="main-content">
@@ -1504,18 +1716,36 @@ function renderResultsPage(res: ScanResult): string {
           </div>
 
           <div class="score-hero-row">
-            <div class="gauge-container">
-              <svg width="140" height="140" viewBox="0 0 140 140" class="gauge-svg">
-                <circle cx="70" cy="70" r="58" stroke="#EAE4D9" stroke-width="10" fill="transparent" />
-                <circle cx="70" cy="70" r="58" stroke="${theme.strokeHex}" stroke-width="10" stroke-dasharray="${circumference}" stroke-dashoffset="${strokeDashoffset}" stroke-linecap="round" fill="transparent" />
-              </svg>
-              <div class="gauge-center">
-                <span data-testid="risk-score-value" class="gauge-big-num ${theme.textClass}">${res.riskScore}</span>
-                <span class="meta-mono">/ 100</span>
+            <div class="d3-gauge-card" aria-label="D3 Threat Level Gauge">
+              <div id="d3-threat-gauge" class="d3-gauge-mount" data-score="${res.riskScore}" data-level="${threatTier}">
+                <svg viewBox="0 0 220 135" class="d3-gauge-svg" role="img" aria-label="Threat Level: ${threatTier} (${res.riskScore} out of 100)">
+                  <g transform="translate(110, 108)">
+                    <path d="M -84 0 A 84 84 0 0 1 -57.5 -61.2 L -45.2 -48.1 A 66 66 0 0 0 -66 0 Z" fill="#059669" opacity="0.88" />
+                    <path d="M -55.5 -63.0 A 84 84 0 0 1 -13.1 -83.0 L -10.3 -65.2 A 66 66 0 0 0 -43.6 -49.5 Z" fill="#D97706" opacity="0.88" />
+                    <path d="M -10.5 -83.3 A 84 84 0 0 1 84 0 L 66 0 A 66 66 0 0 0 -8.2 -65.5 Z" fill="#DC2626" opacity="0.88" />
+                    <text x="-88" y="16" text-anchor="start" font-size="9.5" font-weight="700" fill="#047857" font-family="JetBrains Mono, monospace">LOW</text>
+                    <text x="0" y="-92" text-anchor="middle" font-size="9.5" font-weight="700" fill="#B45309" font-family="JetBrains Mono, monospace">MEDIUM</text>
+                    <text x="88" y="16" text-anchor="end" font-size="9.5" font-weight="700" fill="#B91C1C" font-family="JetBrains Mono, monospace">HIGH</text>
+                    <g class="d3-needle" transform="rotate(${needleDeg.toFixed(1)})">
+                      <path d="M -3.5 0 L 0 -72 L 3.5 0 Z" fill="#1C1917" />
+                      <circle cx="0" cy="0" r="6.5" fill="#1C1917" />
+                      <circle cx="0" cy="0" r="2.5" fill="#FFFFFF" />
+                    </g>
+                  </g>
+                </svg>
+              </div>
+              <div class="d3-gauge-readout">
+                <div>
+                  <span data-testid="risk-score-value" class="gauge-big-num ${theme.textClass}">${res.riskScore}</span>
+                  <span class="meta-mono">/ 100</span>
+                </div>
+                <div data-testid="threat-level-tier" class="threat-level-tier-badge" style="background: ${theme.badgeBg}; border: 1px solid ${theme.badgeBorder}; color: ${theme.strokeHex};">
+                  Threat Level: ${threatTier}
+                </div>
               </div>
             </div>
 
-            <div style="flex: 1;">
+            <div style="flex: 1; min-width: 240px;">
               <div>
                 <span data-testid="risk-classification-label" class="classification-pill" style="background: ${theme.badgeBg}; border: 1px solid ${theme.badgeBorder}; color: ${theme.strokeHex};">${htmlEscape(res.classification)}</span>
               </div>
@@ -1529,7 +1759,7 @@ function renderResultsPage(res: ScanResult): string {
                   <div class="meter-fill ${theme.barClass}" style="width: ${Math.max(4, res.riskScore)}%;"></div>
                 </div>
                 <div class="meter-ticks">
-                  <span>0 Low</span><span>20 Mild</span><span>40 Mod</span><span>60 High</span><span>80+ Critical</span>
+                  <span>0 Low</span><span>20 Medium</span><span>45+ High</span>
                 </div>
               </div>
             </div>
@@ -1765,6 +1995,11 @@ app.post('/api/chat', async (req: Request, res: Response) => {
 // Health check endpoint
 app.get('/health', (_req: Request, res: Response) => {
   res.json({ status: 'ok', engine: 'CyberShield-FullStack-v2' });
+});
+
+app.get('/favicon.ico', (_req: Request, res: Response) => {
+  res.setHeader('Content-Type', 'image/svg+xml');
+  res.send("<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='#C2410C'><path d='M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4z'/></svg>");
 });
 
 app.listen(PORT, '0.0.0.0', () => {
